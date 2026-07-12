@@ -1,0 +1,45 @@
+name: Publish @ohos-ports/opentui-core
+
+# No build step: this package reuses the upstream @opentui/core-linux-arm64-musl
+# libopentui.so as-is (OHOS is musl-ABI-compatible, verified by dlopen + FFI call
+# on a real OHOS device) with a patched resolveNativePackage() that adds an
+# openharmony branch pointing at the bundled .so. The .so itself is committed
+# to this repo (already stripped + self-signed), so publish is just `npm publish`.
+#
+# To refresh from a newer upstream @opentui/core release: download both the
+# @opentui/core@<ver> and @opentui/core-linux-arm64-musl@<ver> tarballs, copy
+# the new base + .so into packages/opentui-core/, re-apply the openharmony
+# branch patch to resolveNativePackage() in the new hashed bundle file, strip +
+# self-sign the .so again, commit, then run this workflow.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org/
+
+      - name: Verify package contents
+        working-directory: packages/opentui-core
+        run: |
+          test -f libopentui.so
+          node -e "console.log(require('./package.json').name)" | grep -q '@ohos-ports/opentui-core'
+          grep -q 'process.platform === "openharmony"' index-d5xqskty.js
+
+      - name: Publish to npm
+        working-directory: packages/opentui-core
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
