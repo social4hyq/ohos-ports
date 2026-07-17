@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import __ohosLibopentuiPath from "./libopentui.so" with { type: "file" };
 var __create = Object.create;
 var __getProtoOf = Object.getPrototypeOf;
 var __defProp = Object.defineProperty;
@@ -11813,7 +11814,7 @@ function validateLinuxLibcOverride() {
 async function resolveNativePackage() {
   if (process.platform === "openharmony") {
     if (process.arch === "arm64") {
-      return { default: fileURLToPath(new URL("./libopentui.so", import.meta.url)) };
+      return { default: __ohosLibopentuiPath };
     }
   }
   if (process.platform === "darwin") {
