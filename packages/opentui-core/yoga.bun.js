@@ -1,3 +1,4 @@
+// @bun
 import {
   ALIGN_AUTO,
   ALIGN_BASELINE,
@@ -92,7 +93,7 @@ import {
   WRAP_WRAP_REVERSE,
   Wrap,
   yoga_default
-} from "./chunk-node-q0cwyvm9.js";
+} from "./chunk-bun-t2myhmwd.js";
 export {
   yoga_default as default,
   Wrap,
@@ -189,5 +190,5 @@ export {
   ALIGN_AUTO
 };
 
-//# debugId=3DEE98A3AAE9E41E64756E2164756E21
-//# sourceMappingURL=yoga.js.map
+//# debugId=EFACC04A7A76B41064756E2164756E21
+//# sourceMappingURL=yoga.bun.js.map

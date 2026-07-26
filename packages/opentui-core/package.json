@@ -1,10 +1,10 @@
 {
   "name": "@ohos-ports/opentui-core",
-  "module": "index.js",
-  "main": "index.js",
+  "module": "index.node.js",
+  "main": "index.node.js",
   "types": "index.d.ts",
   "type": "module",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "OpenTUI is a TypeScript library on a native Zig core for building terminal user interfaces (TUIs) — OpenHarmony (OHOS) port, reuses the upstream linux-arm64-musl libopentui.so (OHOS is musl-ABI-compatible) bundled directly, since that platform package's own os:[\"linux\"] gate blocks installation on process.platform === \"openharmony\".",
   "license": "MIT",
   "repository": {
@@ -14,10 +14,13 @@
   },
   "exports": {
     ".": {
-      "import": "./index.js",
-      "types": "./index.d.ts"
+      "types": "./index.d.ts",
+      "bun": "./index.bun.js",
+      "node": "./index.node.js",
+      "import": "./index.node.js"
     },
     "./testing": {
+      "bun": "./testing.bun.js",
       "import": "./testing.js",
       "types": "./testing.d.ts"
     },
@@ -40,6 +43,7 @@
       "default": "./runtime-plugin-support-configure.node.js"
     },
     "./yoga": {
+      "bun": "./yoga.bun.js",
       "types": "./yoga.d.ts",
       "import": "./yoga.js"
     },
@@ -49,9 +53,15 @@
       "import": "./lib/tree-sitter/update-assets.js"
     },
     "./parser.worker": {
+      "bun": "./parser.worker.js",
+      "node": "./parser.worker.js",
       "import": "./parser.worker.js",
       "require": "./parser.worker.js",
       "types": "./lib/tree-sitter/parser.worker.d.ts"
+    },
+    "./node-assets": {
+      "types": "./node-assets.d.ts",
+      "import": "./node-assets.js"
     }
   },
   "dependencies": {
@@ -65,13 +75,13 @@
     "web-tree-sitter": "0.25.10"
   },
   "optionalDependencies": {
-    "@opentui/core-darwin-x64": "0.4.3",
-    "@opentui/core-darwin-arm64": "0.4.3",
-    "@opentui/core-linux-x64": "0.4.3",
-    "@opentui/core-linux-arm64": "0.4.3",
-    "@opentui/core-win32-x64": "0.4.3",
-    "@opentui/core-win32-arm64": "0.4.3",
-    "@opentui/core-linux-x64-musl": "0.4.3",
-    "@opentui/core-linux-arm64-musl": "0.4.3"
+    "@opentui/core-darwin-x64": "0.4.5",
+    "@opentui/core-darwin-arm64": "0.4.5",
+    "@opentui/core-linux-x64": "0.4.5",
+    "@opentui/core-linux-arm64": "0.4.5",
+    "@opentui/core-win32-x64": "0.4.5",
+    "@opentui/core-win32-arm64": "0.4.5",
+    "@opentui/core-linux-x64-musl": "0.4.5",
+    "@opentui/core-linux-arm64-musl": "0.4.5"
   }
 }

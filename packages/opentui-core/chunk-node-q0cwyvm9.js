@@ -1,5 +1,3 @@
-import { createRequire } from "node:module";
-import __ohosLibopentuiPath from "./libopentui.so" with { type: "file" };
 var __create = Object.create;
 var __getProtoOf = Object.getPrototypeOf;
 var __defProp = Object.defineProperty;
@@ -44,7 +42,6 @@ var __export = (target, all) => {
       set: __exportSetter.bind(all, name)
     });
 };
-var __require = /* @__PURE__ */ createRequire(import.meta.url);
 
 // ../../node_modules/.bun/emoji-regex@10.6.0/node_modules/emoji-regex/index.js
 var require_emoji_regex = __commonJS((exports, module) => {
@@ -152,7 +149,7 @@ __export(exports_yoga, {
 });
 
 // src/platform/ffi.ts
-import { createRequire as createRequire2 } from "node:module";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 var FFIType = {
   char: "char",
@@ -203,6 +200,17 @@ var POINTER_NEGATIVE = "Pointer must be non-negative";
 var POINTER_OFFSET_NEGATIVE = "Pointer offset must be non-negative";
 var POINTER_OFFSET_UNSAFE = "Pointer offset must be a safe integer";
 var POINTER_UNSAFE = "Pointer exceeds safe integer range";
+var arrayBufferByteLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")?.get;
+function isArrayBuffer(value) {
+  if (value === null || typeof value !== "object" || arrayBufferByteLength == null)
+    return false;
+  try {
+    arrayBufferByteLength.call(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
 function unavailable(cause) {
   throw new Error(FFI_UNAVAILABLE, { cause });
 }
@@ -221,7 +229,7 @@ function createUnsupportedBackend(cause) {
   };
 }
 var isBun = typeof process !== "undefined" && typeof process.versions === "object" && process.versions !== null && typeof process.versions.bun === "string";
-var requireModule = createRequire2(import.meta.url);
+var requireModule = createRequire(import.meta.url);
 var backend = loadBackend();
 function loadBackend() {
   if (isBun) {
@@ -430,7 +438,7 @@ function toNodePointerArgument(value) {
     return toBigIntPointer(value);
   }
   if (ArrayBuffer.isView(value)) {
-    if (!(value.buffer instanceof ArrayBuffer)) {
+    if (!isArrayBuffer(value.buffer)) {
       throw new TypeError(NODE_PTR_VALUE);
     }
     if (value.byteLength === 0) {
@@ -438,7 +446,7 @@ function toNodePointerArgument(value) {
     }
     return value;
   }
-  if (value instanceof ArrayBuffer) {
+  if (isArrayBuffer(value)) {
     if (value.byteLength === 0) {
       return 0n;
     }
@@ -448,12 +456,12 @@ function toNodePointerArgument(value) {
 }
 function toNodeSourcePointer(nodeFfi, value) {
   if (ArrayBuffer.isView(value)) {
-    if (!(value.buffer instanceof ArrayBuffer)) {
+    if (!isArrayBuffer(value.buffer)) {
       throw new TypeError(NODE_PTR_VALUE);
     }
     return nodeFfi.getRawPointer(value.buffer) + BigInt(value.byteOffset);
   }
-  if (value instanceof ArrayBuffer) {
+  if (isArrayBuffer(value)) {
     return nodeFfi.getRawPointer(value);
   }
   throw new TypeError(NODE_PTR_VALUE);
@@ -560,8 +568,8 @@ var toArrayBuffer = backend.toArrayBuffer;
 // src/platform/runtime.ts
 import { existsSync } from "node:fs";
 import { mkdir, writeFile as writeFileNode } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { dirname, isAbsolute as isAbsolute2, resolve } from "node:path";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
 
 // ../../node_modules/.bun/ansi-regex@6.2.2/node_modules/ansi-regex/index.js
 function ansiRegex({ onlyFirst = false } = {}) {
@@ -655,6 +663,231 @@ function stringWidth(string, options = {}) {
   return width;
 }
 
+// src/platform/assets.ts
+import { statSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+
+// src/lib/singleton.ts
+var singletonCacheSymbol = Symbol.for("@opentui/core/singleton");
+function singleton(key, factory) {
+  const bag = globalThis[singletonCacheSymbol] ??= {};
+  if (!(key in bag)) {
+    bag[key] = factory();
+  }
+  return bag[key];
+}
+function getSingleton(key) {
+  const bag = globalThis[singletonCacheSymbol];
+  return bag?.[key];
+}
+function destroySingleton(key) {
+  const bag = globalThis[singletonCacheSymbol];
+  if (bag && key in bag) {
+    delete bag[key];
+  }
+}
+
+// src/lib/env.ts
+var envRegistry = singleton("env-registry", () => ({}));
+function registerEnvVar(config) {
+  const existing = envRegistry[config.name];
+  if (existing) {
+    if (existing.description !== config.description || existing.type !== config.type || existing.default !== config.default) {
+      throw new Error(`Environment variable "${config.name}" is already registered with different configuration. ` + `Existing: ${JSON.stringify(existing)}, New: ${JSON.stringify(config)}`);
+    }
+    return;
+  }
+  envRegistry[config.name] = config;
+}
+function normalizeBoolean(value) {
+  const lowerValue = value.toLowerCase();
+  return ["true", "1", "on", "yes"].includes(lowerValue);
+}
+function parseEnvValue(config) {
+  const envValue = process.env[config.name];
+  if (envValue === undefined && config.default !== undefined) {
+    return config.default;
+  }
+  if (envValue === undefined) {
+    throw new Error(`Required environment variable ${config.name} is not set. ${config.description}`);
+  }
+  switch (config.type) {
+    case "boolean":
+      return typeof envValue === "boolean" ? envValue : normalizeBoolean(envValue);
+    case "number":
+      const numValue = Number(envValue);
+      if (isNaN(numValue)) {
+        throw new Error(`Environment variable ${config.name} must be a valid number, got: ${envValue}`);
+      }
+      return numValue;
+    case "string":
+    default:
+      return envValue;
+  }
+}
+
+class EnvStore {
+  parsedValues = new Map;
+  get(key) {
+    if (this.parsedValues.has(key)) {
+      return this.parsedValues.get(key);
+    }
+    if (!(key in envRegistry)) {
+      throw new Error(`Environment variable ${key} is not registered.`);
+    }
+    try {
+      const value = parseEnvValue(envRegistry[key]);
+      this.parsedValues.set(key, value);
+      return value;
+    } catch (error) {
+      throw new Error(`Failed to parse env var ${key}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  has(key) {
+    return key in envRegistry;
+  }
+  clearCache() {
+    this.parsedValues.clear();
+  }
+}
+var envStore = singleton("env-store", () => new EnvStore);
+function clearEnvCache() {
+  envStore.clearCache();
+}
+function generateEnvMarkdown() {
+  const configs = Object.values(envRegistry);
+  if (configs.length === 0) {
+    return `# Environment Variables
+
+No environment variables registered.
+`;
+  }
+  let markdown = `# Environment Variables
+
+`;
+  for (const config of configs) {
+    markdown += `## ${config.name}
+
+`;
+    markdown += `${config.description}
+
+`;
+    markdown += `**Type:** \`${config.type || "string"}\`  
+`;
+    if (config.default !== undefined) {
+      const defaultValue = typeof config.default === "string" ? `"${config.default}"` : String(config.default);
+      markdown += `**Default:** \`${defaultValue}\`
+`;
+    } else {
+      markdown += `**Default:** *Required*
+`;
+    }
+    markdown += `
+`;
+  }
+  return markdown;
+}
+function generateEnvColored() {
+  const configs = Object.values(envRegistry);
+  if (configs.length === 0) {
+    return `\x1B[1;36mEnvironment Variables\x1B[0m
+
+No environment variables registered.
+`;
+  }
+  let output = `\x1B[1;36mEnvironment Variables\x1B[0m
+
+`;
+  for (const config of configs) {
+    output += `\x1B[1;33m${config.name}\x1B[0m
+`;
+    output += `${config.description}
+`;
+    output += `\x1B[32mType:\x1B[0m \x1B[36m${config.type || "string"}\x1B[0m
+`;
+    if (config.default !== undefined) {
+      const defaultValue = typeof config.default === "string" ? `"${config.default}"` : String(config.default);
+      output += `\x1B[32mDefault:\x1B[0m \x1B[35m${defaultValue}\x1B[0m
+`;
+    } else {
+      output += `\x1B[32mDefault:\x1B[0m \x1B[31mRequired\x1B[0m
+`;
+    }
+    output += `
+`;
+  }
+  return output;
+}
+var env = new Proxy({}, {
+  get(target, prop) {
+    if (typeof prop !== "string") {
+      return;
+    }
+    return envStore.get(prop);
+  },
+  has(target, prop) {
+    return envStore.has(prop);
+  },
+  ownKeys() {
+    return Object.keys(envRegistry);
+  },
+  getOwnPropertyDescriptor(target, prop) {
+    if (envStore.has(prop)) {
+      return {
+        enumerable: true,
+        configurable: true,
+        get: () => envStore.get(prop)
+      };
+    }
+    return;
+  }
+});
+
+// src/platform/assets.ts
+registerEnvVar({
+  name: "OTUI_ASSET_ROOT",
+  description: "Absolute directory containing relocatable OpenTUI runtime assets",
+  type: "string",
+  default: ""
+});
+function resolveAssetPath(key, fallback) {
+  validateAssetKey(key);
+  const configuredPath = resolveAssetRootPath(key);
+  if (configuredPath !== undefined) {
+    return configuredPath;
+  }
+  if (fallback === undefined) {
+    throw new Error(`OpenTUI asset ${JSON.stringify(key)} has no package-relative fallback`);
+  }
+  const value = typeof fallback === "function" ? fallback() : fallback;
+  return value instanceof URL ? fileURLToPath2(value) : value;
+}
+function resolveAssetRootPath(key) {
+  validateAssetKey(key);
+  const root = process.env.OTUI_ASSET_ROOT;
+  if (!root) {
+    return;
+  }
+  if (!isAbsolute(root)) {
+    throw new Error(`OTUI_ASSET_ROOT must be an absolute directory, got ${JSON.stringify(root)}`);
+  }
+  const assetPath = join(root, key);
+  let isFile = false;
+  try {
+    isFile = statSync(assetPath).isFile();
+  } catch {}
+  if (!isFile) {
+    throw new Error(`Missing OpenTUI asset ${JSON.stringify(key)} at ${JSON.stringify(assetPath)}`);
+  }
+  return assetPath;
+}
+function validateAssetKey(key) {
+  if (key.length === 0 || isAbsolute(key) || key.includes("\\") || key.split("/").includes("..")) {
+    throw new Error(`Invalid OpenTUI asset key: ${JSON.stringify(key)}`);
+  }
+}
+
 // src/platform/runtime.ts
 var TEXT_ENCODER = new TextEncoder;
 var bun = globalThis.Bun;
@@ -662,33 +895,46 @@ var sleep = bun?.sleep ?? standardSleep;
 var stringWidth2 = bun?.stringWidth ?? stringWidth;
 var stripANSI = bun?.stripANSI ?? stripAnsi;
 var writeFile = bun?.write ?? writeFilePortable;
-async function resolveBundledFilePath(loadBundledFile, fallbackPath, metaUrl) {
+async function resolveBundledFilePath(key, loadBundledFile, fallbackPath, metaUrl, options = {}) {
+  if (options.useAssetRoot ?? true) {
+    const configuredPath = resolveAssetRootPath(key);
+    if (configuredPath !== undefined) {
+      return configuredPath;
+    }
+  }
   if (!bun) {
     const path = resolveFallbackFilePath(fallbackPath, metaUrl);
     if (existsSync(path)) {
       return path;
     }
-    return await loadBundledFilePath(loadBundledFile, metaUrl) ?? path;
+    return await loadBundledFilePath(loadBundledFile, metaUrl, options.loadBundledFileFallback ?? false) ?? path;
   }
   return normalizeLoadedFilePath((await loadBundledFile()).default, metaUrl);
 }
 function resolveFallbackFilePath(fallbackPath, metaUrl) {
   const path = typeof fallbackPath === "function" ? fallbackPath() : fallbackPath;
-  return fileURLToPath2(path instanceof URL ? path : new URL(path, metaUrl));
+  return fileURLToPath3(path instanceof URL ? path : new URL(path, metaUrl));
 }
 function normalizeLoadedFilePath(loadedPath, baseUrl) {
   if (loadedPath.startsWith("file:")) {
-    return fileURLToPath2(loadedPath);
+    return fileURLToPath3(loadedPath);
   }
-  if (isAbsolute(loadedPath)) {
+  if (isAbsolute2(loadedPath)) {
     return loadedPath;
   }
-  return resolve(dirname(fileURLToPath2(baseUrl)), loadedPath);
+  return resolve(dirname(fileURLToPath3(baseUrl)), loadedPath);
 }
-async function loadBundledFilePath(loadBundledFile, metaUrl) {
+async function loadBundledFilePath(loadBundledFile, metaUrl, loadBundledFileFallback) {
   const specifier = extractBundledImportSpecifier(loadBundledFile);
   if (!specifier) {
-    return;
+    if (!loadBundledFileFallback) {
+      return;
+    }
+    try {
+      return normalizeLoadedFilePath((await loadBundledFile()).default, metaUrl);
+    } catch {
+      return;
+    }
   }
   try {
     const moduleUrl = new URL(specifier, metaUrl);
@@ -707,7 +953,7 @@ function standardSleep(msOrDate) {
   return new Promise((resolve2) => setTimeout(resolve2, ms));
 }
 async function writeFilePortable(destination, data, options) {
-  const destinationPath = destination instanceof URL ? fileURLToPath2(destination) : destination;
+  const destinationPath = destination instanceof URL ? fileURLToPath3(destination) : destination;
   if (options?.createPath) {
     await mkdir(dirname(destinationPath), { recursive: true });
   }
@@ -5896,181 +6142,6 @@ class ASCIIFontSelectionHelper {
     return previousSelection?.start !== this.localSelection?.start || previousSelection?.end !== this.localSelection?.end;
   }
 }
-// src/lib/singleton.ts
-var singletonCacheSymbol = Symbol.for("@opentui/core/singleton");
-function singleton(key, factory) {
-  const bag = globalThis[singletonCacheSymbol] ??= {};
-  if (!(key in bag)) {
-    bag[key] = factory();
-  }
-  return bag[key];
-}
-function getSingleton(key) {
-  const bag = globalThis[singletonCacheSymbol];
-  return bag?.[key];
-}
-function destroySingleton(key) {
-  const bag = globalThis[singletonCacheSymbol];
-  if (bag && key in bag) {
-    delete bag[key];
-  }
-}
-
-// src/lib/env.ts
-var envRegistry = singleton("env-registry", () => ({}));
-function registerEnvVar(config) {
-  const existing = envRegistry[config.name];
-  if (existing) {
-    if (existing.description !== config.description || existing.type !== config.type || existing.default !== config.default) {
-      throw new Error(`Environment variable "${config.name}" is already registered with different configuration. ` + `Existing: ${JSON.stringify(existing)}, New: ${JSON.stringify(config)}`);
-    }
-    return;
-  }
-  envRegistry[config.name] = config;
-}
-function normalizeBoolean(value) {
-  const lowerValue = value.toLowerCase();
-  return ["true", "1", "on", "yes"].includes(lowerValue);
-}
-function parseEnvValue(config) {
-  const envValue = process.env[config.name];
-  if (envValue === undefined && config.default !== undefined) {
-    return config.default;
-  }
-  if (envValue === undefined) {
-    throw new Error(`Required environment variable ${config.name} is not set. ${config.description}`);
-  }
-  switch (config.type) {
-    case "boolean":
-      return typeof envValue === "boolean" ? envValue : normalizeBoolean(envValue);
-    case "number":
-      const numValue = Number(envValue);
-      if (isNaN(numValue)) {
-        throw new Error(`Environment variable ${config.name} must be a valid number, got: ${envValue}`);
-      }
-      return numValue;
-    case "string":
-    default:
-      return envValue;
-  }
-}
-
-class EnvStore {
-  parsedValues = new Map;
-  get(key) {
-    if (this.parsedValues.has(key)) {
-      return this.parsedValues.get(key);
-    }
-    if (!(key in envRegistry)) {
-      throw new Error(`Environment variable ${key} is not registered.`);
-    }
-    try {
-      const value = parseEnvValue(envRegistry[key]);
-      this.parsedValues.set(key, value);
-      return value;
-    } catch (error) {
-      throw new Error(`Failed to parse env var ${key}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  has(key) {
-    return key in envRegistry;
-  }
-  clearCache() {
-    this.parsedValues.clear();
-  }
-}
-var envStore = singleton("env-store", () => new EnvStore);
-function clearEnvCache() {
-  envStore.clearCache();
-}
-function generateEnvMarkdown() {
-  const configs = Object.values(envRegistry);
-  if (configs.length === 0) {
-    return `# Environment Variables
-
-No environment variables registered.
-`;
-  }
-  let markdown = `# Environment Variables
-
-`;
-  for (const config of configs) {
-    markdown += `## ${config.name}
-
-`;
-    markdown += `${config.description}
-
-`;
-    markdown += `**Type:** \`${config.type || "string"}\`  
-`;
-    if (config.default !== undefined) {
-      const defaultValue = typeof config.default === "string" ? `"${config.default}"` : String(config.default);
-      markdown += `**Default:** \`${defaultValue}\`
-`;
-    } else {
-      markdown += `**Default:** *Required*
-`;
-    }
-    markdown += `
-`;
-  }
-  return markdown;
-}
-function generateEnvColored() {
-  const configs = Object.values(envRegistry);
-  if (configs.length === 0) {
-    return `\x1B[1;36mEnvironment Variables\x1B[0m
-
-No environment variables registered.
-`;
-  }
-  let output = `\x1B[1;36mEnvironment Variables\x1B[0m
-
-`;
-  for (const config of configs) {
-    output += `\x1B[1;33m${config.name}\x1B[0m
-`;
-    output += `${config.description}
-`;
-    output += `\x1B[32mType:\x1B[0m \x1B[36m${config.type || "string"}\x1B[0m
-`;
-    if (config.default !== undefined) {
-      const defaultValue = typeof config.default === "string" ? `"${config.default}"` : String(config.default);
-      output += `\x1B[32mDefault:\x1B[0m \x1B[35m${defaultValue}\x1B[0m
-`;
-    } else {
-      output += `\x1B[32mDefault:\x1B[0m \x1B[31mRequired\x1B[0m
-`;
-    }
-    output += `
-`;
-  }
-  return output;
-}
-var env = new Proxy({}, {
-  get(target, prop) {
-    if (typeof prop !== "string") {
-      return;
-    }
-    return envStore.get(prop);
-  },
-  has(target, prop) {
-    return envStore.has(prop);
-  },
-  ownKeys() {
-    return Object.keys(envRegistry);
-  },
-  getOwnPropertyDescriptor(target, prop) {
-    if (envStore.has(prop)) {
-      return {
-        enumerable: true,
-        configurable: true,
-        get: () => envStore.get(prop)
-      };
-    }
-    return;
-  }
-});
 // src/lib/stdin-parser.ts
 import { Buffer as Buffer3 } from "node:buffer";
 var DEFAULT_TIMEOUT_MS = 20;
@@ -7833,92 +7904,159 @@ class ProcessQueue {
   }
 }
 
-// src/lib/tree-sitter/default-parsers.ts
-var _cachedParsers;
-function getParsers() {
-  if (!_cachedParsers) {
-    _cachedParsers = loadParsers();
+// src/node-asset-target.ts
+var NATIVE_FILE_NAMES = {
+  darwin: "libopentui.dylib",
+  linux: "libopentui.so",
+  win32: "opentui.dll",
+  // OHOS is musl-ABI-compatible with linux-arm64-musl; the bundled .so below
+  // is resolved directly (see the openharmony branch in resolveNativeLibraryPath),
+  // so this entry only needs to satisfy getNativeAssetDescriptor()'s platform
+  // check — it never resolves to an actual @opentui/core-openharmony-* package.
+  openharmony: "libopentui.so"
+};
+function getNativeAssetDescriptor(target) {
+  if (!Object.hasOwn(NATIVE_FILE_NAMES, target.platform) || target.arch !== "arm64" && target.arch !== "x64") {
+    throw new Error(`Unsupported OpenTUI Node asset target: ${String(target.platform)}-${String(target.arch)}`);
   }
-  return _cachedParsers;
+  if (target.libc !== undefined && target.libc !== "glibc" && target.libc !== "musl") {
+    throw new Error(`Unsupported libc for OpenTUI Node assets: ${String(target.libc)}`);
+  }
+  if (target.platform !== "linux" && target.libc !== undefined) {
+    throw new Error(`OpenTUI Node asset target libc is only supported on Linux, got ${target.platform}`);
+  }
+  const libcSuffix = target.platform === "linux" && target.libc === "musl" ? "-musl" : "";
+  const packageName = `@opentui/core-${target.platform}-${target.arch}${libcSuffix}`;
+  const fileName = NATIVE_FILE_NAMES[target.platform];
+  return {
+    key: `${packageName}/${fileName}`,
+    packageName,
+    fileName
+  };
 }
-async function loadParsers() {
-  const javascript_highlights = await resolveBundledFilePath(() => import("./assets/javascript/highlights.scm", { with: { type: "file" } }), "./assets/javascript/highlights.scm", import.meta.url);
-  const javascript_language = await resolveBundledFilePath(() => import("./assets/javascript/tree-sitter-javascript.wasm", { with: { type: "file" } }), "./assets/javascript/tree-sitter-javascript.wasm", import.meta.url);
-  const typescript_highlights = await resolveBundledFilePath(() => import("./assets/typescript/highlights.scm", { with: { type: "file" } }), "./assets/typescript/highlights.scm", import.meta.url);
-  const typescript_language = await resolveBundledFilePath(() => import("./assets/typescript/tree-sitter-typescript.wasm", { with: { type: "file" } }), "./assets/typescript/tree-sitter-typescript.wasm", import.meta.url);
-  const markdown_highlights = await resolveBundledFilePath(() => import("./assets/markdown/highlights.scm", { with: { type: "file" } }), "./assets/markdown/highlights.scm", import.meta.url);
-  const markdown_language = await resolveBundledFilePath(() => import("./assets/markdown/tree-sitter-markdown.wasm", { with: { type: "file" } }), "./assets/markdown/tree-sitter-markdown.wasm", import.meta.url);
-  const markdown_injections = await resolveBundledFilePath(() => import("./assets/markdown/injections.scm", { with: { type: "file" } }), "./assets/markdown/injections.scm", import.meta.url);
-  const markdown_inline_highlights = await resolveBundledFilePath(() => import("./assets/markdown_inline/highlights.scm", { with: { type: "file" } }), "./assets/markdown_inline/highlights.scm", import.meta.url);
-  const markdown_inline_language = await resolveBundledFilePath(() => import("./assets/markdown_inline/tree-sitter-markdown_inline.wasm", { with: { type: "file" } }), "./assets/markdown_inline/tree-sitter-markdown_inline.wasm", import.meta.url);
-  const zig_highlights = await resolveBundledFilePath(() => import("./assets/zig/highlights.scm", { with: { type: "file" } }), "./assets/zig/highlights.scm", import.meta.url);
-  const zig_language = await resolveBundledFilePath(() => import("./assets/zig/tree-sitter-zig.wasm", { with: { type: "file" } }), "./assets/zig/tree-sitter-zig.wasm", import.meta.url);
-  return [
-    {
-      filetype: "javascript",
-      aliases: ["javascriptreact"],
-      queries: {
-        highlights: [javascript_highlights]
-      },
-      wasm: javascript_language
+function getCurrentNodeAssetTarget() {
+  const libc = process.env.OPENTUI_LIBC;
+  if (process.platform === "linux" && libc !== undefined && libc !== "" && libc !== "glibc" && libc !== "musl") {
+    throw new Error(`On Linux, OPENTUI_LIBC must be unset, empty, "glibc", or "musl", got ${JSON.stringify(libc)}`);
+  }
+  return {
+    platform: process.platform,
+    arch: process.arch,
+    ...process.platform === "linux" && libc === "musl" ? { libc } : {}
+  };
+}
+
+// src/platform/runtime-assets.node.ts
+var CORE_ASSET_PREFIX = "@opentui/core/";
+var PARSER_WORKER_ASSET_KEY = `${CORE_ASSET_PREFIX}parser.worker.js`;
+var TREE_SITTER_WASM_ASSET_KEY = "web-tree-sitter/tree-sitter.wasm";
+function resolveDefaultParserAsset(relativePath, fallbackPath) {
+  return Promise.resolve(resolveAssetPath(`${CORE_ASSET_PREFIX}${relativePath}`, fallbackPath));
+}
+function resolveDefaultTreeSitterWorkerPath(fallbackPath) {
+  return resolveAssetPath(PARSER_WORKER_ASSET_KEY, fallbackPath);
+}
+function resolveTreeSitterWasm() {
+  return Promise.resolve(resolveAssetPath(TREE_SITTER_WASM_ASSET_KEY, () => new URL(import.meta.resolve(TREE_SITTER_WASM_ASSET_KEY))));
+}
+async function resolveNativeLibraryPath() {
+  const asset = getNativeAssetDescriptor(getCurrentNodeAssetTarget());
+  const configuredPath = resolveAssetRootPath(asset.key);
+  if (configuredPath !== undefined) {
+    return configuredPath;
+  }
+  if (process.platform === "openharmony" && process.arch === "arm64") {
+    return fileURLToPath(new URL("./libopentui.so", import.meta.url));
+  }
+  const specifier = asset.packageName;
+  return (await import(specifier)).default;
+}
+
+// src/lib/tree-sitter/default-parsers.ts
+var defaultParserDescriptors = [
+  {
+    filetype: "javascript",
+    aliases: ["javascriptreact"],
+    queries: { highlights: ["assets/javascript/highlights.scm"] },
+    wasm: "assets/javascript/tree-sitter-javascript.wasm"
+  },
+  {
+    filetype: "typescript",
+    aliases: ["typescriptreact"],
+    queries: { highlights: ["assets/typescript/highlights.scm"] },
+    wasm: "assets/typescript/tree-sitter-typescript.wasm"
+  },
+  {
+    filetype: "markdown",
+    queries: {
+      highlights: ["assets/markdown/highlights.scm"],
+      injections: ["assets/markdown/injections.scm"]
     },
-    {
-      filetype: "typescript",
-      aliases: ["typescriptreact"],
-      queries: {
-        highlights: [typescript_highlights]
-      },
-      wasm: typescript_language
-    },
-    {
-      filetype: "markdown",
-      queries: {
-        highlights: [markdown_highlights],
-        injections: [markdown_injections]
-      },
-      wasm: markdown_language,
-      injectionMapping: {
-        nodeTypes: {
-          inline: "markdown_inline",
-          pipe_table_cell: "markdown_inline"
-        },
-        infoStringMap: {
-          javascript: "javascript",
-          js: "javascript",
-          jsx: "javascriptreact",
-          javascriptreact: "javascriptreact",
-          typescript: "typescript",
-          ts: "typescript",
-          tsx: "typescriptreact",
-          typescriptreact: "typescriptreact",
-          markdown: "markdown",
-          md: "markdown"
-        }
+    wasm: "assets/markdown/tree-sitter-markdown.wasm",
+    injectionMapping: {
+      nodeTypes: { inline: "markdown_inline", pipe_table_cell: "markdown_inline" },
+      infoStringMap: {
+        javascript: "javascript",
+        js: "javascript",
+        jsx: "javascriptreact",
+        javascriptreact: "javascriptreact",
+        typescript: "typescript",
+        ts: "typescript",
+        tsx: "typescriptreact",
+        typescriptreact: "typescriptreact",
+        markdown: "markdown",
+        md: "markdown"
       }
-    },
-    {
-      filetype: "markdown_inline",
-      queries: {
-        highlights: [markdown_inline_highlights]
-      },
-      wasm: markdown_inline_language
-    },
-    {
-      filetype: "zig",
-      queries: {
-        highlights: [zig_highlights]
-      },
-      wasm: zig_language
     }
-  ];
+  },
+  {
+    filetype: "markdown_inline",
+    queries: { highlights: ["assets/markdown_inline/highlights.scm"] },
+    wasm: "assets/markdown_inline/tree-sitter-markdown_inline.wasm"
+  },
+  {
+    filetype: "zig",
+    queries: { highlights: ["assets/zig/highlights.scm"] },
+    wasm: "assets/zig/tree-sitter-zig.wasm"
+  }
+];
+var defaultParserAssetPaths = [
+  ...new Set(defaultParserDescriptors.flatMap((parser) => [
+    ...parser.queries.highlights,
+    parser.wasm,
+    ...parser.queries.injections ?? []
+  ]))
+];
+var cachedParsers;
+function getParsers() {
+  cachedParsers ??= Promise.all(defaultParserDescriptors.map(resolveDefaultParser));
+  return cachedParsers;
+}
+async function resolveDefaultParser(parser) {
+  const queries = {
+    highlights: await Promise.all(parser.queries.highlights.map(resolveParserAsset))
+  };
+  if (parser.queries.injections) {
+    queries.injections = await Promise.all(parser.queries.injections.map(resolveParserAsset));
+  }
+  return {
+    filetype: parser.filetype,
+    ...parser.aliases ? { aliases: [...parser.aliases] } : {},
+    queries,
+    wasm: await resolveParserAsset(parser.wasm),
+    ...parser.injectionMapping ? { injectionMapping: parser.injectionMapping } : {}
+  };
+}
+function resolveParserAsset(relativePath) {
+  return resolveDefaultParserAsset(relativePath, new URL(`./${relativePath}`, import.meta.url));
 }
 
 // src/lib/tree-sitter/client.ts
-import { resolve as resolve2, isAbsolute as isAbsolute2, parse } from "path";
+import { resolve as resolve2, isAbsolute as isAbsolute3, parse } from "path";
 import { existsSync as existsSync2 } from "fs";
 
 // src/lib/bunfs.ts
-import { basename, join } from "node:path";
+import { basename, join as join2 } from "node:path";
 function isBunfsPath(path) {
   return path.includes("$bunfs") || /^B:[\\/]~BUN/i.test(path);
 }
@@ -7926,7 +8064,7 @@ function getBunfsRootPath() {
   return process.platform === "win32" ? "B:\\~BUN\\root" : "/$bunfs/root";
 }
 function normalizeBunfsPath(fileName) {
-  return join(getBunfsRootPath(), basename(fileName));
+  return join2(getBunfsRootPath(), basename(fileName));
 }
 
 // src/platform/worker.ts
@@ -8313,8 +8451,8 @@ class TreeSitterClient extends EventEmitter2 {
     if (typeof OTUI_TREE_SITTER_WORKER_PATH !== "undefined") {
       return OTUI_TREE_SITTER_WORKER_PATH;
     }
-    let workerPath = new URL("./parser.worker.js", import.meta.url).href;
-    if (!existsSync2(resolve2(import.meta.dirname, "parser.worker.js"))) {
+    let workerPath = resolveDefaultTreeSitterWorkerPath(new URL("./parser.worker.js", import.meta.url));
+    if (!process.env.OTUI_ASSET_ROOT && !existsSync2(workerPath)) {
       workerPath = new URL("./parser.worker.ts", import.meta.url).href;
     }
     return workerPath;
@@ -8391,6 +8529,8 @@ class TreeSitterClient extends EventEmitter2 {
     }
   }
   async initializeClient(generation, worker) {
+    const treeSitterWasmPath = await resolveTreeSitterWasm();
+    this.assertCurrentInitialization(generation, worker);
     await new Promise((resolve3, reject) => {
       const timeoutMs = this.options.initTimeout ?? 1e4;
       const timeoutId = setTimeout(() => {
@@ -8402,7 +8542,8 @@ class TreeSitterClient extends EventEmitter2 {
       this.initializeResolvers = { resolve: resolve3, reject, timeoutId };
       this.sendWorkerMessage({
         type: "INIT",
-        dataPath: this.options.dataPath
+        dataPath: this.options.dataPath,
+        treeSitterWasmPath
       });
     });
     this.assertCurrentInitialization(generation, worker);
@@ -8428,7 +8569,7 @@ class TreeSitterClient extends EventEmitter2 {
     if (isBunfsPath(path)) {
       return normalizeBunfsPath(parse(path).base);
     }
-    if (!isAbsolute2(path)) {
+    if (!isAbsolute3(path)) {
       return resolve2(path);
     }
     return path;
@@ -11762,6 +11903,33 @@ var ReserveInfoStruct = defineStruct([
     len: value.len
   })
 });
+var NativeAudioStreamFormat = {
+  Mp3: 1,
+  Flac: 2
+};
+var NativeAudioStreamState = {
+  Initializing: 0,
+  Buffering: 1,
+  Playing: 2,
+  Ended: 3,
+  Failed: 4,
+  Cancelled: 5,
+  Reconnecting: 6
+};
+var NativeAudioStreamStateNames = [
+  "initializing",
+  "buffering",
+  "playing",
+  "ended",
+  "errored",
+  "disposed",
+  "reconnecting"
+];
+var NativeAudioStreamCloseReason = {
+  PreserveNativeTerminal: 0,
+  TransportError: 1,
+  Disposed: 2
+};
 var AudioCreateOptionsStruct = defineStruct([
   ["sampleRate", "u32", { default: 48000 }],
   ["playbackChannels", "u32", { default: 2 }]
@@ -11789,6 +11957,29 @@ var AudioVoiceOptionsStruct = defineStruct([
   ["loop", "bool_u8", { default: false }],
   ["groupId", "u32", { default: 0 }]
 ]);
+var AudioStreamCreateOptionsStruct = defineStruct([
+  ["capacityMs", "u32"],
+  ["startupMs", "u32"],
+  ["resumeMs", "u32"],
+  ["volume", "f32"],
+  ["pan", "f32"],
+  ["groupId", "u32"],
+  ["maxProbeBytes", "u32"],
+  ["format", "u32"]
+]);
+var AudioStreamStatsStruct = defineStruct([
+  ["bytesReceived", "u64"],
+  ["framesDecoded", "u64"],
+  ["framesPlayed", "u64"],
+  ["state", "u32"],
+  ["sampleRate", "u32"],
+  ["channels", "u32"],
+  ["bufferedFrames", "u32"],
+  ["capacityFrames", "u32"],
+  ["underruns", "u32"],
+  ["errorCode", "i32"],
+  ["readyGeneration", "u32"]
+]);
 var AudioStatsStruct = defineStruct([
   ["soundsLoaded", "u32"],
   ["voicesActive", "u32"],
@@ -11799,62 +11990,27 @@ var AudioStatsStruct = defineStruct([
 ]);
 
 // src/zig.ts
+var NativeAudioStreamState2 = NativeAudioStreamState;
+var NativeAudioStreamCloseReason2 = NativeAudioStreamCloseReason;
+var NativeAudioStreamFormat2 = NativeAudioStreamFormat;
 registerEnvVar({
   name: "OPENTUI_LIBC",
   description: "Select Linux native libc package. Supported values: glibc, musl.",
   type: "string",
   default: ""
 });
-function validateLinuxLibcOverride() {
-  const libc = process.env.OPENTUI_LIBC;
-  if (libc === undefined || libc === "" || libc === "glibc" || libc === "musl")
-    return;
-  throw new Error(`On Linux, OPENTUI_LIBC must be unset, empty, "glibc", or "musl", got "${libc}"`);
-}
-async function resolveNativePackage() {
-  if (process.platform === "openharmony") {
-    if (process.arch === "arm64") {
-      return { default: __ohosLibopentuiPath };
-    }
+var targetLibPath;
+var targetLibError;
+try {
+  targetLibPath = await resolveNativeLibraryPath();
+  if (isBunfsPath(targetLibPath)) {
+    targetLibPath = targetLibPath.replace("../", "");
   }
-  if (process.platform === "darwin") {
-    if (process.arch === "x64")
-      return await import("@opentui/core-darwin-x64");
-    if (process.arch === "arm64")
-      return await import("@opentui/core-darwin-arm64");
+  if (!existsSync3(targetLibPath)) {
+    throw new Error(`OpenTUI native library does not exist at ${JSON.stringify(targetLibPath)}`);
   }
-  if (process.platform === "linux") {
-    validateLinuxLibcOverride();
-    if (process.arch === "x64") {
-      if (process.env.OPENTUI_LIBC === "musl") {
-        return await import("@opentui/core-linux-x64-musl");
-      } else {
-        return await import("@opentui/core-linux-x64");
-      }
-    }
-    if (process.arch === "arm64") {
-      if (process.env.OPENTUI_LIBC === "musl") {
-        return await import("@opentui/core-linux-arm64-musl");
-      } else {
-        return await import("@opentui/core-linux-arm64");
-      }
-    }
-  }
-  if (process.platform === "win32") {
-    if (process.arch === "x64")
-      return await import("@opentui/core-win32-x64");
-    if (process.arch === "arm64")
-      return await import("@opentui/core-win32-arm64");
-  }
-  throw new Error(`opentui is not supported on the current platform: ${process.platform}-${process.arch}`);
-}
-var nativePackage = await resolveNativePackage();
-var targetLibPath = nativePackage.default;
-if (isBunfsPath(targetLibPath)) {
-  targetLibPath = targetLibPath.replace("../", "");
-}
-if (!existsSync3(targetLibPath)) {
-  throw new Error(`opentui is not supported on the current platform: ${process.platform}-${process.arch}`);
+} catch (error) {
+  targetLibError = error instanceof Error ? error : new Error(String(error));
 }
 registerEnvVar({
   name: "OTUI_DEBUG_FFI",
@@ -11917,6 +12073,9 @@ function toSafeFFIU32Length(value, label) {
   }
   return value;
 }
+function isFFIU32(value) {
+  return Number.isInteger(value) && value >= 0 && value <= MAX_FFI_U32;
+}
 function ptrOrNull(value) {
   return value.byteLength === 0 ? null : ptr(value);
 }
@@ -11928,6 +12087,9 @@ function optionalRgbaPtr(value) {
 }
 function getOpenTUILib(libPath) {
   const resolvedLibPath = libPath || targetLibPath;
+  if (!resolvedLibPath) {
+    throw targetLibError ?? new Error(`OpenTUI is not supported on the current platform: ${process.platform}-${process.arch}`);
+  }
   const rawSymbols = dlopen(resolvedLibPath, {
     setLogCallback: {
       args: ["ptr"],
@@ -13165,6 +13327,42 @@ function getOpenTUILib(libPath) {
       args: ["u32"],
       returns: "i32"
     },
+    audioCreateStream: {
+      args: ["u32", "ptr", "ptr"],
+      returns: "i32"
+    },
+    audioWriteStream: {
+      args: ["u32", "u32", "ptr", "u32"],
+      returns: "i32"
+    },
+    audioEndStream: {
+      args: ["u32", "u32"],
+      returns: "i32"
+    },
+    audioRestartStream: {
+      args: ["u32", "u32"],
+      returns: "i32"
+    },
+    audioSetStreamVolume: {
+      args: ["u32", "u32", "f32"],
+      returns: "i32"
+    },
+    audioSetStreamPan: {
+      args: ["u32", "u32", "f32"],
+      returns: "i32"
+    },
+    audioSetStreamGroup: {
+      args: ["u32", "u32", "u32"],
+      returns: "i32"
+    },
+    audioGetStreamStats: {
+      args: ["u32", "u32", "ptr"],
+      returns: "i32"
+    },
+    audioCloseStream: {
+      args: ["u32", "u32", "u32", "ptr"],
+      returns: "i32"
+    },
     audioLoad: {
       args: ["u32", "ptr", "u32", "ptr"],
       returns: "i32"
@@ -13379,10 +13577,10 @@ function convertToDebugSymbols(symbols) {
           const medianWidth = Math.max(medHeader.length, ...allStats.map((s) => s.median.toFixed(2).length));
           const p90Width = Math.max(p90Header.length, ...allStats.map((s) => s.p90.toFixed(2).length));
           const p99Width = Math.max(p99Header.length, ...allStats.map((s) => s.p99.toFixed(2).length));
-          lines.push(`${nameHeader.padEnd(nameWidth)} | ${callsHeader.padStart(countWidth)} | ${totalHeader.padStart(totalWidth)} | ${avgHeader.padStart(avgWidth)} | ${minHeader.padStart(statWidthMin)} | ${maxHeader.padStart(statWidthMax)} | ${medHeader.padStart(medianWidth)} | ${p90Header.padStart(p90Width)} | ${p99Header.padStart(p99Width)}`);
+          lines.push(`${nameHeader.padEnd(nameWidth)} | ` + `${callsHeader.padStart(countWidth)} | ` + `${totalHeader.padStart(totalWidth)} | ` + `${avgHeader.padStart(avgWidth)} | ` + `${minHeader.padStart(statWidthMin)} | ` + `${maxHeader.padStart(statWidthMax)} | ` + `${medHeader.padStart(medianWidth)} | ` + `${p90Header.padStart(p90Width)} | ` + `${p99Header.padStart(p99Width)}`);
           lines.push(`${"-".repeat(nameWidth)}-+-${"-".repeat(countWidth)}-+-${"-".repeat(totalWidth)}-+-${"-".repeat(avgWidth)}-+-${"-".repeat(statWidthMin)}-+-${"-".repeat(statWidthMax)}-+-${"-".repeat(medianWidth)}-+-${"-".repeat(p90Width)}-+-${"-".repeat(p99Width)}`);
           allStats.forEach((stat) => {
-            lines.push(`${stat.name.padEnd(nameWidth)} | ${String(stat.count).padStart(countWidth)} | ${stat.total.toFixed(2).padStart(totalWidth)} | ${stat.average.toFixed(2).padStart(avgWidth)} | ${stat.min.toFixed(2).padStart(statWidthMin)} | ${stat.max.toFixed(2).padStart(statWidthMax)} | ${stat.median.toFixed(2).padStart(medianWidth)} | ${stat.p90.toFixed(2).padStart(p90Width)} | ${stat.p99.toFixed(2).padStart(p99Width)}`);
+            lines.push(`${stat.name.padEnd(nameWidth)} | ` + `${String(stat.count).padStart(countWidth)} | ` + `${stat.total.toFixed(2).padStart(totalWidth)} | ` + `${stat.average.toFixed(2).padStart(avgWidth)} | ` + `${stat.min.toFixed(2).padStart(statWidthMin)} | ` + `${stat.max.toFixed(2).padStart(statWidthMax)} | ` + `${stat.median.toFixed(2).padStart(medianWidth)} | ` + `${stat.p90.toFixed(2).padStart(p90Width)} | ` + `${stat.p99.toFixed(2).padStart(p99Width)}`);
           });
         }
         lines.push("-------------------------------------------------------------------------------------------------------------------------");
@@ -14919,7 +15117,12 @@ class FFIRenderLib {
     this.opentui.symbols.audioClearPlaybackDeviceSelection(engine);
   }
   audioStart(engine, options) {
-    const optionsBuffer = options == null ? null : AudioStartOptionsStruct.pack(options);
+    let optionsBuffer;
+    try {
+      optionsBuffer = options == null ? null : AudioStartOptionsStruct.pack(options);
+    } catch {
+      return -1;
+    }
     return this.opentui.symbols.audioStart(engine, optionsBuffer ? ptr(optionsBuffer) : null);
   }
   audioStartMixer(engine) {
@@ -14927,6 +15130,52 @@ class FFIRenderLib {
   }
   audioStop(engine) {
     return this.opentui.symbols.audioStop(engine);
+  }
+  audioCreateStream(engine, options) {
+    if (!isFFIU32(options.groupId) || options.format !== NativeAudioStreamFormat2.Mp3 && options.format !== NativeAudioStreamFormat2.Flac) {
+      return { status: -1, streamId: null };
+    }
+    const optionsBuffer = AudioStreamCreateOptionsStruct.pack(options);
+    const outBuffer = new ArrayBuffer(4);
+    const status = this.opentui.symbols.audioCreateStream(engine, optionsBuffer, outBuffer);
+    if (status !== 0)
+      return { status, streamId: null };
+    return { status, streamId: new Uint32Array(outBuffer)[0] ?? null };
+  }
+  audioWriteStream(engine, streamId, data) {
+    const dataLength = toSafeFFIU32Length(data.byteLength, "Audio stream data length");
+    return this.opentui.symbols.audioWriteStream(engine, streamId, dataLength === 0 ? null : data, dataLength);
+  }
+  audioEndStream(engine, streamId) {
+    return this.opentui.symbols.audioEndStream(engine, streamId);
+  }
+  audioRestartStream(engine, streamId) {
+    return this.opentui.symbols.audioRestartStream(engine, streamId);
+  }
+  audioSetStreamVolume(engine, streamId, volume) {
+    return this.opentui.symbols.audioSetStreamVolume(engine, streamId, volume);
+  }
+  audioSetStreamPan(engine, streamId, pan) {
+    return this.opentui.symbols.audioSetStreamPan(engine, streamId, pan);
+  }
+  audioSetStreamGroup(engine, streamId, groupId) {
+    if (!isFFIU32(groupId))
+      return -1;
+    return this.opentui.symbols.audioSetStreamGroup(engine, streamId, groupId);
+  }
+  audioGetStreamStats(engine, streamId) {
+    const outBuffer = new ArrayBuffer(AudioStreamStatsStruct.size);
+    const status = this.opentui.symbols.audioGetStreamStats(engine, streamId, outBuffer);
+    if (status !== 0)
+      return null;
+    return AudioStreamStatsStruct.unpack(outBuffer);
+  }
+  audioCloseStream(engine, streamId, reason) {
+    const outBuffer = new ArrayBuffer(AudioStreamStatsStruct.size);
+    const status = this.opentui.symbols.audioCloseStream(engine, streamId, reason, outBuffer);
+    if (status !== 0)
+      return { status, stats: null };
+    return { status, stats: AudioStreamStatsStruct.unpack(outBuffer) };
   }
   audioLoad(engine, data) {
     const outBuffer = new ArrayBuffer(4);
@@ -14942,6 +15191,8 @@ class FFIRenderLib {
     return this.opentui.symbols.audioUnload(engine, soundId);
   }
   audioPlay(engine, soundId, options) {
+    if (options?.groupId !== undefined && !isFFIU32(options.groupId))
+      return { status: -1, voiceId: null };
     const outBuffer = new ArrayBuffer(4);
     const optionsBuffer = options ? AudioVoiceOptionsStruct.pack(options) : null;
     const status = this.opentui.symbols.audioPlay(engine, soundId, optionsBuffer ? ptr(optionsBuffer) : null, ptr(outBuffer));
@@ -14955,6 +15206,8 @@ class FFIRenderLib {
     return this.opentui.symbols.audioStopVoice(engine, voiceId);
   }
   audioSetVoiceGroup(engine, voiceId, groupId) {
+    if (!isFFIU32(groupId))
+      return -1;
     return this.opentui.symbols.audioSetVoiceGroup(engine, voiceId, groupId);
   }
   audioCreateGroup(engine, name) {
@@ -16110,7 +16363,7 @@ var Yoga = {
 };
 var yoga_default = Yoga;
 
-export { toArrayBuffer, sleep, stringWidth2 as stringWidth, DEFAULT_FOREGROUND_RGB, DEFAULT_BACKGROUND_RGB, normalizeIndexedColorIndex, ansi256IndexToRgb, RGBA, normalizeColorValue, hexToRgb, rgbToHex, hsvToRgb, parseColor, isValidBorderStyle, parseBorderStyle, BorderChars, getBorderFromSides, getBorderSides, borderCharsToArray, BorderCharArrays, KeyEvent, PasteEvent, KeyHandler, InternalKeyHandler, fonts, measureText, getCharacterPositions, coordinateToCharacterIndex, renderFontToFrameBuffer, TextAttributes, ATTRIBUTE_BASE_BITS, ATTRIBUTE_BASE_MASK, getBaseAttributes, DebugOverlayCorner, TargetChannel, createTextAttributes, attributesWithLink, getLinkId, visualizeRenderableTree, isStyledText, StyledText, stringToStyledText, black, red, green, yellow, blue, magenta, cyan, white, brightBlack, brightRed, brightGreen, brightYellow, brightBlue, brightMagenta, brightCyan, brightWhite, bgBlack, bgRed, bgGreen, bgYellow, bgBlue, bgMagenta, bgCyan, bgWhite, bold, italic, underline, strikethrough, dim, reverse, blink, fg, bg, link, t, hastToStyledText, SystemClock, nonAlphanumericKeys, terminalNamedSingleStrokeKeys, parseKeypress, LinearScrollAccel, MacOSScrollAccel, parseAlign, parseAlignItems, parseBoxSizing, parseDimension, parseDirection, parseDisplay, parseEdge, parseFlexDirection, parseGutter, parseJustify, parseLogLevel, parseMeasureMode, parseOverflow, parsePositionType, parseUnit, parseWrap, MouseParser, Selection, convertGlobalToLocalSelection, ASCIIFontSelectionHelper, singleton, envRegistry, registerEnvVar, clearEnvCache, generateEnvMarkdown, generateEnvColored, env, StdinParser, treeSitterToTextChunks, treeSitterToStyledText, addDefaultParsers, TreeSitterClient, DataPathsManager, getDataPaths, extensionToFiletype, basenameToFiletype, extToFiletype, pathToFiletype, infoStringToFiletype, getTreeSitterClient, destroyTreeSitterClient, ExtmarksController, createExtmarksController, TerminalPalette, createTerminalPalette, normalizeTerminalPalette, buildTerminalPaletteSignature, decodePasteBytes, stripAnsiSequences, ClipboardTarget, Clipboard, detectLinks, OptimizedBuffer, TextBuffer, SpanInfoStruct, LogLevel2 as LogLevel, NativeMeasureTargetKind, setRenderLibPath, resolveRenderLib, Align, BoxSizing, Dimension, Direction, Display, Edge, Errata, ExperimentalFeature, FlexDirection, Gutter, Justify, LogLevel as LogLevel1, MeasureMode, NodeType, Overflow, PositionType, Unit, Wrap, ALIGN_AUTO, ALIGN_FLEX_START, ALIGN_CENTER, ALIGN_FLEX_END, ALIGN_STRETCH, ALIGN_BASELINE, ALIGN_SPACE_BETWEEN, ALIGN_SPACE_AROUND, ALIGN_SPACE_EVENLY, BOX_SIZING_BORDER_BOX, BOX_SIZING_CONTENT_BOX, DIMENSION_WIDTH, DIMENSION_HEIGHT, DIRECTION_INHERIT, DIRECTION_LTR, DIRECTION_RTL, DISPLAY_FLEX, DISPLAY_NONE, DISPLAY_CONTENTS, EDGE_LEFT, EDGE_TOP, EDGE_RIGHT, EDGE_BOTTOM, EDGE_START, EDGE_END, EDGE_HORIZONTAL, EDGE_VERTICAL, EDGE_ALL, ERRATA_NONE, ERRATA_STRETCH_FLEX_BASIS, ERRATA_ABSOLUTE_POSITION_WITHOUT_INSETS_EXCLUDES_PADDING, ERRATA_ABSOLUTE_PERCENT_AGAINST_INNER_SIZE, ERRATA_ALL, ERRATA_CLASSIC, EXPERIMENTAL_FEATURE_WEB_FLEX_BASIS, FLEX_DIRECTION_COLUMN, FLEX_DIRECTION_COLUMN_REVERSE, FLEX_DIRECTION_ROW, FLEX_DIRECTION_ROW_REVERSE, GUTTER_COLUMN, GUTTER_ROW, GUTTER_ALL, JUSTIFY_FLEX_START, JUSTIFY_CENTER, JUSTIFY_FLEX_END, JUSTIFY_SPACE_BETWEEN, JUSTIFY_SPACE_AROUND, JUSTIFY_SPACE_EVENLY, LOG_LEVEL_ERROR, LOG_LEVEL_WARN, LOG_LEVEL_INFO, LOG_LEVEL_DEBUG, LOG_LEVEL_VERBOSE, LOG_LEVEL_FATAL, MEASURE_MODE_UNDEFINED, MEASURE_MODE_EXACTLY, MEASURE_MODE_AT_MOST, NODE_TYPE_DEFAULT, NODE_TYPE_TEXT, OVERFLOW_VISIBLE, OVERFLOW_HIDDEN, OVERFLOW_SCROLL, POSITION_TYPE_STATIC, POSITION_TYPE_RELATIVE, POSITION_TYPE_ABSOLUTE, UNIT_UNDEFINED, UNIT_POINT, UNIT_PERCENT, UNIT_AUTO, WRAP_NO_WRAP, WRAP_WRAP, WRAP_WRAP_REVERSE, Config, Node, exports_yoga, yoga_default };
+export { toArrayBuffer, singleton, envRegistry, registerEnvVar, clearEnvCache, generateEnvMarkdown, generateEnvColored, env, sleep, stringWidth2 as stringWidth, resolveBundledFilePath, DEFAULT_FOREGROUND_RGB, DEFAULT_BACKGROUND_RGB, normalizeIndexedColorIndex, ansi256IndexToRgb, RGBA, normalizeColorValue, hexToRgb, rgbToHex, hsvToRgb, parseColor, isValidBorderStyle, parseBorderStyle, BorderChars, getBorderFromSides, getBorderSides, borderCharsToArray, BorderCharArrays, KeyEvent, PasteEvent, KeyHandler, InternalKeyHandler, fonts, measureText, getCharacterPositions, coordinateToCharacterIndex, renderFontToFrameBuffer, TextAttributes, ATTRIBUTE_BASE_BITS, ATTRIBUTE_BASE_MASK, getBaseAttributes, DebugOverlayCorner, TargetChannel, createTextAttributes, attributesWithLink, getLinkId, visualizeRenderableTree, isStyledText, StyledText, stringToStyledText, black, red, green, yellow, blue, magenta, cyan, white, brightBlack, brightRed, brightGreen, brightYellow, brightBlue, brightMagenta, brightCyan, brightWhite, bgBlack, bgRed, bgGreen, bgYellow, bgBlue, bgMagenta, bgCyan, bgWhite, bold, italic, underline, strikethrough, dim, reverse, blink, fg, bg, link, t, hastToStyledText, SystemClock, nonAlphanumericKeys, terminalNamedSingleStrokeKeys, parseKeypress, LinearScrollAccel, MacOSScrollAccel, parseAlign, parseAlignItems, parseBoxSizing, parseDimension, parseDirection, parseDisplay, parseEdge, parseFlexDirection, parseGutter, parseJustify, parseLogLevel, parseMeasureMode, parseOverflow, parsePositionType, parseUnit, parseWrap, MouseParser, Selection, convertGlobalToLocalSelection, ASCIIFontSelectionHelper, StdinParser, treeSitterToTextChunks, treeSitterToStyledText, addDefaultParsers, TreeSitterClient, DataPathsManager, getDataPaths, extensionToFiletype, basenameToFiletype, extToFiletype, pathToFiletype, infoStringToFiletype, getTreeSitterClient, destroyTreeSitterClient, ExtmarksController, createExtmarksController, TerminalPalette, createTerminalPalette, normalizeTerminalPalette, buildTerminalPaletteSignature, decodePasteBytes, stripAnsiSequences, ClipboardTarget, Clipboard, detectLinks, OptimizedBuffer, TextBuffer, SpanInfoStruct, NativeAudioStreamFormat, NativeAudioStreamState, NativeAudioStreamStateNames, NativeAudioStreamCloseReason, NativeAudioStreamState2 as NativeAudioStreamState1, NativeAudioStreamCloseReason2 as NativeAudioStreamCloseReason1, NativeAudioStreamFormat2 as NativeAudioStreamFormat1, LogLevel2 as LogLevel, NativeMeasureTargetKind, setRenderLibPath, resolveRenderLib, Align, BoxSizing, Dimension, Direction, Display, Edge, Errata, ExperimentalFeature, FlexDirection, Gutter, Justify, LogLevel as LogLevel1, MeasureMode, NodeType, Overflow, PositionType, Unit, Wrap, ALIGN_AUTO, ALIGN_FLEX_START, ALIGN_CENTER, ALIGN_FLEX_END, ALIGN_STRETCH, ALIGN_BASELINE, ALIGN_SPACE_BETWEEN, ALIGN_SPACE_AROUND, ALIGN_SPACE_EVENLY, BOX_SIZING_BORDER_BOX, BOX_SIZING_CONTENT_BOX, DIMENSION_WIDTH, DIMENSION_HEIGHT, DIRECTION_INHERIT, DIRECTION_LTR, DIRECTION_RTL, DISPLAY_FLEX, DISPLAY_NONE, DISPLAY_CONTENTS, EDGE_LEFT, EDGE_TOP, EDGE_RIGHT, EDGE_BOTTOM, EDGE_START, EDGE_END, EDGE_HORIZONTAL, EDGE_VERTICAL, EDGE_ALL, ERRATA_NONE, ERRATA_STRETCH_FLEX_BASIS, ERRATA_ABSOLUTE_POSITION_WITHOUT_INSETS_EXCLUDES_PADDING, ERRATA_ABSOLUTE_PERCENT_AGAINST_INNER_SIZE, ERRATA_ALL, ERRATA_CLASSIC, EXPERIMENTAL_FEATURE_WEB_FLEX_BASIS, FLEX_DIRECTION_COLUMN, FLEX_DIRECTION_COLUMN_REVERSE, FLEX_DIRECTION_ROW, FLEX_DIRECTION_ROW_REVERSE, GUTTER_COLUMN, GUTTER_ROW, GUTTER_ALL, JUSTIFY_FLEX_START, JUSTIFY_CENTER, JUSTIFY_FLEX_END, JUSTIFY_SPACE_BETWEEN, JUSTIFY_SPACE_AROUND, JUSTIFY_SPACE_EVENLY, LOG_LEVEL_ERROR, LOG_LEVEL_WARN, LOG_LEVEL_INFO, LOG_LEVEL_DEBUG, LOG_LEVEL_VERBOSE, LOG_LEVEL_FATAL, MEASURE_MODE_UNDEFINED, MEASURE_MODE_EXACTLY, MEASURE_MODE_AT_MOST, NODE_TYPE_DEFAULT, NODE_TYPE_TEXT, OVERFLOW_VISIBLE, OVERFLOW_HIDDEN, OVERFLOW_SCROLL, POSITION_TYPE_STATIC, POSITION_TYPE_RELATIVE, POSITION_TYPE_ABSOLUTE, UNIT_UNDEFINED, UNIT_POINT, UNIT_PERCENT, UNIT_AUTO, WRAP_NO_WRAP, WRAP_WRAP, WRAP_WRAP_REVERSE, Config, Node, exports_yoga, yoga_default };
 
-//# debugId=FC7AC9CF38562F8A64756E2164756E21
-//# sourceMappingURL=index-d5xqskty.js.map
+//# debugId=F036A274BA18217764756E2164756E21
+//# sourceMappingURL=chunk-node-q0cwyvm9.js.map

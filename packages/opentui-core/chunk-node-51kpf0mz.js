@@ -40,7 +40,7 @@ import {
   toArrayBuffer,
   treeSitterToTextChunks,
   yoga_default
-} from "./index-d5xqskty.js";
+} from "./chunk-node-q0cwyvm9.js";
 
 // src/Renderable.ts
 import { EventEmitter } from "events";
@@ -4959,6 +4959,7 @@ class TerminalConsole extends EventEmitter4 {
   }
   hide() {
     if (this.isVisible) {
+      this.stopAutoScroll();
       this.isVisible = false;
       this.blur();
       terminalConsoleCache.setCachingEnabled(true);
@@ -10041,5 +10042,5 @@ Captured external output:
 
 export { h, isVNode, maybeMakeRenderable, wrapWithDelegates, instantiate, delegate, LayoutEvents, RenderableEvents, isRenderable, BaseRenderable, Renderable, RootRenderable, TextBufferView, EditBuffer, EditorView, convertThemeToStyles, SyntaxStyle, ANSI, BoxRenderable, TextBufferRenderable, CodeRenderable, isTextNodeRenderable, TextNodeRenderable, RootTextNodeRenderable, TextRenderable, NativeSpanFeed, defaultKeyAliases, mergeKeyAliases, mergeKeyBindings, getKeyBindingAction, buildKeyBindingsMap, capture, ConsolePosition, TerminalConsole, getObjectsInViewport, EditBufferRenderableEvents, isEditBufferRenderable, EditBufferRenderable, buildKittyKeyboardFlags, MouseEvent, MouseButton, createCliRenderer, CliRenderEvents, RendererControlState, CliRenderer };
 
-//# debugId=9F3FCD78D0AED08D64756E2164756E21
-//# sourceMappingURL=index-xt9f071j.js.map
+//# debugId=505B20901D301C3264756E2164756E21
+//# sourceMappingURL=chunk-node-51kpf0mz.js.map

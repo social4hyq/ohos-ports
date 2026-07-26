@@ -37,7 +37,7 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import * as coreRuntime from "./index.js";
+import * as coreRuntime from "@opentui/core";
 const CORE_RUNTIME_SPECIFIER = "@opentui/core";
 const CORE_TESTING_RUNTIME_SPECIFIER = "@opentui/core/testing";
 const RUNTIME_MODULE_PREFIX = "opentui:runtime-module:";
@@ -52,7 +52,7 @@ export const isCoreRuntimeModuleSpecifier = (specifier) => {
     return DEFAULT_CORE_RUNTIME_MODULE_SPECIFIER_SET.has(specifier);
 };
 const loadCoreTestingRuntimeModule = async () => {
-    return (await import("./testing.js"));
+    return (await import("@opentui/core/testing"));
 };
 const escapeRegExp = (value) => {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

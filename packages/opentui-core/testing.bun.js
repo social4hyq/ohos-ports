@@ -1,14 +1,15 @@
+// @bun
 import {
   ANSI,
   CliRenderer
-} from "./chunk-node-51kpf0mz.js";
+} from "./chunk-bun-tkm837n2.js";
 import {
   SystemClock,
   TreeSitterClient
-} from "./chunk-node-q0cwyvm9.js";
+} from "./chunk-bun-t2myhmwd.js";
 
 // src/testing/mock-keys.ts
-import { Buffer as Buffer2 } from "node:buffer";
+import { Buffer as Buffer2 } from "buffer";
 function pasteBytes(text) {
   return Uint8Array.from(Buffer2.from(text));
 }
@@ -230,7 +231,7 @@ function createMockKeys(renderer, options) {
               "]": "\x1D",
               "^": "\x1E",
               _: "\x1F",
-              "?": "",
+              "?": "\x7F",
               "/": "\x1F",
               "-": "\x1F",
               ".": "\x1E",
@@ -1000,5 +1001,5 @@ export {
   KeyCodes
 };
 
-//# debugId=08D19767EB8430A064756E2164756E21
-//# sourceMappingURL=testing.js.map
+//# debugId=0357928BEE71C0AA64756E2164756E21
+//# sourceMappingURL=testing.bun.js.map

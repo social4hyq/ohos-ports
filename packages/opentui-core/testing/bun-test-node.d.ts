@@ -27,6 +27,7 @@ declare class AsyncExpectation<T> {
     toBeNull(): Promise<void>;
     toBeUndefined(): Promise<void>;
     toContain(expected: unknown): Promise<void>;
+    toHaveProperty(property: PropertyKey, expectedValue?: unknown): Promise<void>;
     toMatchSnapshot(snapshotName?: string): Promise<void>;
     toMatchInlineSnapshot(snapshot: string): Promise<void>;
     toThrow(expected?: ThrowMatcher): Promise<void>;

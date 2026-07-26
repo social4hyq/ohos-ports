@@ -43,7 +43,7 @@ import {
   mergeKeyAliases,
   mergeKeyBindings,
   wrapWithDelegates
-} from "./index-xt9f071j.js";
+} from "./chunk-node-51kpf0mz.js";
 import {
   ASCIIFontSelectionHelper,
   ATTRIBUTE_BASE_BITS,
@@ -64,6 +64,13 @@ import {
   LogLevel,
   MacOSScrollAccel,
   MouseParser,
+  NativeAudioStreamCloseReason,
+  NativeAudioStreamCloseReason1 as NativeAudioStreamCloseReason2,
+  NativeAudioStreamFormat,
+  NativeAudioStreamFormat1 as NativeAudioStreamFormat2,
+  NativeAudioStreamState,
+  NativeAudioStreamState1 as NativeAudioStreamState2,
+  NativeAudioStreamStateNames,
   NativeMeasureTargetKind,
   OptimizedBuffer,
   PasteEvent,
@@ -169,6 +176,7 @@ import {
   red,
   registerEnvVar,
   renderFontToFrameBuffer,
+  resolveBundledFilePath,
   resolveRenderLib,
   reverse,
   rgbToHex,
@@ -185,7 +193,7 @@ import {
   visualizeRenderableTree,
   white,
   yellow
-} from "./index-d5xqskty.js";
+} from "./chunk-node-q0cwyvm9.js";
 // src/post/effects.ts
 function toU8(value) {
   return Math.round(Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0)) * 255);
@@ -2526,39 +2534,1294 @@ class SlotRenderable extends Renderable {
 // src/audio.ts
 import { EventEmitter } from "events";
 import { readFile } from "node:fs/promises";
+
+// src/audio-stream/icy/metadata.ts
+function parseIcyMetadata(bytes, decoder) {
+  const decoded = decoder.decode(bytes);
+  const nul = decoded.indexOf("\x00");
+  const text = nul === -1 ? decoded : decoded.slice(0, nul);
+  if (text.length === 0)
+    return null;
+  const fields = Object.create(null);
+  let found = false;
+  let offset = 0;
+  while (offset < text.length) {
+    const separator = text.indexOf("='", offset);
+    if (separator === -1)
+      break;
+    const key = text.slice(offset, separator);
+    if (key.length === 0 || /[';=]/.test(key))
+      break;
+    const end = text.indexOf("';", separator + 2);
+    if (end === -1)
+      break;
+    Object.defineProperty(fields, key, {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: text.slice(separator + 2, end)
+    });
+    found = true;
+    offset = end + 2;
+  }
+  return found ? Object.freeze(fields) : null;
+}
+
+// src/audio-stream/icy/demuxer.ts
+var EMPTY_FIELDS = Object.freeze(Object.create(null));
+function copyHeaders(headers) {
+  const copy = Object.create(null);
+  for (const [name, value] of Object.entries(headers ?? {}))
+    copy[name.toLowerCase()] = value;
+  return Object.freeze(copy);
+}
+function fieldsEqual(left, right) {
+  const keys = Object.keys(left);
+  return keys.length === Object.keys(right).length && keys.every((key) => Object.prototype.hasOwnProperty.call(right, key) && left[key] === right[key]);
+}
+
+class IcyStreamDemuxer {
+  initialMetadata;
+  audioRemaining;
+  metadata = null;
+  metadataOffset = 0;
+  fields = EMPTY_FIELDS;
+  interval;
+  decoder;
+  headers;
+  constructor(options) {
+    if (!Number.isSafeInteger(options.metadataInterval) || options.metadataInterval < 0) {
+      throw new TypeError("metadataInterval must be a non-negative safe integer");
+    }
+    this.interval = options.metadataInterval;
+    try {
+      this.decoder = new TextDecoder(options.metadataEncoding ?? "iso-8859-1");
+    } catch {
+      throw new TypeError(`Unsupported metadataEncoding: ${options.metadataEncoding}`);
+    }
+    this.headers = copyHeaders(options.headers);
+    this.audioRemaining = this.interval;
+    this.initialMetadata = Object.freeze({ format: "icy", headers: this.headers, fields: this.fields });
+  }
+  *push(chunk) {
+    if (this.interval === 0) {
+      if (chunk.byteLength > 0)
+        yield { type: "audio", data: chunk };
+      return;
+    }
+    let offset = 0;
+    while (offset < chunk.byteLength) {
+      if (this.audioRemaining > 0) {
+        const length2 = Math.min(this.audioRemaining, chunk.byteLength - offset);
+        yield { type: "audio", data: chunk.subarray(offset, offset + length2) };
+        offset += length2;
+        this.audioRemaining -= length2;
+        continue;
+      }
+      if (this.metadata == null) {
+        const metadataLength = (chunk[offset] ?? 0) * 16;
+        offset += 1;
+        if (metadataLength === 0) {
+          this.audioRemaining = this.interval;
+          continue;
+        }
+        this.metadata = new Uint8Array(metadataLength);
+        this.metadataOffset = 0;
+      }
+      const metadata = this.metadata;
+      const length = Math.min(metadata.byteLength - this.metadataOffset, chunk.byteLength - offset);
+      metadata.set(chunk.subarray(offset, offset + length), this.metadataOffset);
+      offset += length;
+      this.metadataOffset += length;
+      if (this.metadataOffset !== metadata.byteLength)
+        continue;
+      const fields = parseIcyMetadata(metadata, this.decoder);
+      this.metadata = null;
+      this.metadataOffset = 0;
+      this.audioRemaining = this.interval;
+      if (fields != null && !fieldsEqual(this.fields, fields)) {
+        this.fields = fields;
+        yield {
+          type: "metadata",
+          metadata: Object.freeze({ format: "icy", headers: this.headers, fields })
+        };
+      }
+    }
+  }
+  *flush() {
+    if (this.interval === 0)
+      return;
+    if (this.audioRemaining === 0 || this.metadata != null) {
+      throw new Error("ICY stream ended inside a metadata block");
+    }
+  }
+}
+function createIcyStreamDemuxer(options) {
+  return new IcyStreamDemuxer(options);
+}
+
+// src/audio-stream/demuxer.ts
+function selectAudioStreamDemuxer(options) {
+  const icyHeaders = Object.create(null);
+  options.headers.forEach((value2, name) => {
+    if (name.toLowerCase().startsWith("icy-"))
+      icyHeaders[name.toLowerCase()] = value2;
+  });
+  const headers = Object.freeze(icyHeaders);
+  const rawInterval = options.headers.get("icy-metaint");
+  if (rawInterval == null) {
+    return Object.keys(headers).length === 0 ? null : createIcyStreamDemuxer({ metadataInterval: 0, metadataEncoding: options.metadataEncoding, headers });
+  }
+  const value = rawInterval.trim();
+  if (!/^\d+$/.test(value))
+    throw new Error(`Invalid icy-metaint response header: ${rawInterval}`);
+  const interval = Number(value);
+  if (!Number.isSafeInteger(interval))
+    throw new Error(`Invalid icy-metaint response header: ${rawInterval}`);
+  return createIcyStreamDemuxer({ metadataInterval: interval, metadataEncoding: options.metadataEncoding, headers });
+}
+
+// src/audio.ts
+class AudioInitializationError extends Error {
+  action;
+  status;
+  constructor(action, message, status, cause) {
+    super(message);
+    this.name = "AudioInitializationError";
+    this.action = action;
+    this.status = status;
+    if (cause !== undefined)
+      this.cause = cause;
+  }
+}
 function statusToError(action, status) {
   return new Error(`Audio ${action} failed: ${status}`);
 }
 function toBytes(data) {
   return data instanceof Uint8Array ? data : new Uint8Array(data);
 }
+var DEFAULT_AUDIO_SAMPLE_RATE = 48000;
+var DEFAULT_STREAM_PROBE_BYTES = 1024 * 1024;
+var STREAM_POLL_INTERVAL_MS = 5;
+var MAX_TIMER_DELAY_MS = 2147483647;
+var MAX_U32 = 4294967295;
+var INVALID_STREAM_CHUNK_MESSAGE = "Audio stream chunks must be Uint8Array instances";
+
+class AudioStreamError extends Error {
+  context;
+  constructor(message, context, cause) {
+    super(message);
+    this.name = "AudioStreamError";
+    this.context = context;
+    if (cause !== undefined)
+      this.cause = cause;
+  }
+}
+
+class ClassifiedAudioStreamError extends AudioStreamError {
+  retryable;
+  retryAfterMs;
+  constructor(message, context, retryable, retryAfterMs, cause) {
+    super(message, context, cause);
+    this.retryable = retryable;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+function createAbortError() {
+  return new DOMException("The operation was aborted", "AbortError");
+}
+var isU32 = (value) => Number.isInteger(value) && value >= 0 && value <= MAX_U32;
+function resolvePositiveU32(value, fallback, name) {
+  const resolved = value ?? fallback;
+  if (!Number.isFinite(resolved) || !Number.isInteger(resolved) || resolved <= 0) {
+    throw new TypeError(`${name} must be a finite positive integer`);
+  }
+  if (resolved > MAX_U32)
+    throw new RangeError(`${name} exceeds the supported limit`);
+  return resolved;
+}
+function resolveReconnectOptions(options) {
+  const maxRetries = options.maxRetries ?? Number.POSITIVE_INFINITY;
+  const initialDelayMs = options.initialDelayMs ?? 1000;
+  const maxDelayMs = options.maxDelayMs ?? 15000;
+  const backoffFactor = options.backoffFactor ?? 2;
+  const retryOnEnd = options.retryOnEnd ?? false;
+  const retry = options.retry;
+  if (maxRetries !== Number.POSITIVE_INFINITY && (!Number.isInteger(maxRetries) || maxRetries < 0)) {
+    throw new TypeError("reconnect.maxRetries must be a non-negative integer or Infinity");
+  }
+  if (!Number.isFinite(initialDelayMs) || !Number.isInteger(initialDelayMs) || initialDelayMs < 0) {
+    throw new TypeError("reconnect.initialDelayMs must be a finite non-negative integer");
+  }
+  if (!Number.isFinite(maxDelayMs) || !Number.isInteger(maxDelayMs) || maxDelayMs < 0) {
+    throw new TypeError("reconnect.maxDelayMs must be a finite non-negative integer");
+  }
+  if (!Number.isFinite(backoffFactor) || backoffFactor < 1) {
+    throw new TypeError("reconnect.backoffFactor must be a finite number greater than or equal to 1");
+  }
+  if (typeof retryOnEnd !== "boolean") {
+    throw new TypeError("reconnect.retryOnEnd must be a boolean");
+  }
+  if (retry !== undefined && typeof retry !== "function") {
+    throw new TypeError("reconnect.retry must be a function");
+  }
+  return {
+    maxRetries,
+    initialDelayMs,
+    maxDelayMs,
+    backoffFactor,
+    retryOnEnd,
+    retry: retry == null ? undefined : (error, context) => retry.call(options, error, context)
+  };
+}
+function resolveAudioStreamOptions(options) {
+  const format = resolveAudioStreamFormat(options.format);
+  const capacityMs = resolvePositiveU32(options.buffer?.capacityMs, 2000, "buffer.capacityMs");
+  const startupMs = resolvePositiveU32(options.buffer?.startupMs, 1000, "buffer.startupMs");
+  const resumeMs = resolvePositiveU32(options.buffer?.resumeMs, 1000, "buffer.resumeMs");
+  const maxProbeBytes = resolvePositiveU32(options.maxProbeBytes, DEFAULT_STREAM_PROBE_BYTES, "maxProbeBytes");
+  if (startupMs > capacityMs)
+    throw new RangeError("buffer.startupMs must not exceed buffer.capacityMs");
+  if (resumeMs > capacityMs)
+    throw new RangeError("buffer.resumeMs must not exceed buffer.capacityMs");
+  return {
+    format,
+    capacityMs,
+    startupMs,
+    resumeMs,
+    volume: options.volume ?? 1,
+    pan: options.pan ?? 0,
+    groupId: options.groupId ?? 0,
+    maxProbeBytes,
+    signal: options.signal,
+    reconnect: options.reconnect === undefined ? undefined : resolveReconnectOptions(options.reconnect)
+  };
+}
+function resolveAudioStreamConnector(connector) {
+  const connect = connector?.connect;
+  if (typeof connect !== "function")
+    throw new TypeError("Audio stream connector must define connect()");
+  return { connect: (context) => connect.call(connector, context) };
+}
+function runBoundedCleanup(cleanup, timeoutMs = 50) {
+  let result;
+  try {
+    result = Promise.resolve(cleanup()).catch(() => {
+      return;
+    });
+  } catch {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs);
+    result.then(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+function waitForDelay(delayMs, signal) {
+  if (signal.aborted)
+    return Promise.reject(createAbortError());
+  return new Promise((resolve, reject) => {
+    let remainingMs = delayMs;
+    let timer;
+    const schedule = () => {
+      const currentDelayMs = Math.min(remainingMs, MAX_TIMER_DELAY_MS);
+      timer = setTimeout(() => {
+        remainingMs -= currentDelayMs;
+        if (remainingMs > 0)
+          schedule();
+        else {
+          signal.removeEventListener("abort", onAbort);
+          resolve();
+        }
+      }, currentDelayMs);
+    };
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(createAbortError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    schedule();
+  });
+}
+function waitForPoll(signal) {
+  return waitForDelay(STREAM_POLL_INTERVAL_MS, signal).then(() => true).catch(() => false);
+}
+function parseRetryAfter(value, maxDelayMs) {
+  if (value == null)
+    return;
+  const seconds = Number(value.trim());
+  if (Number.isFinite(seconds) && seconds >= 0)
+    return Math.min(maxDelayMs, Math.ceil(seconds * 1000));
+  const date = Date.parse(value);
+  if (!Number.isFinite(date))
+    return;
+  return Math.min(maxDelayMs, Math.max(0, date - Date.now()));
+}
+function resolveAudioStreamFormat(value) {
+  const format = value ?? "mp3";
+  if (format !== "mp3" && format !== "flac")
+    throw new TypeError(`Unsupported audio stream format: ${format}`);
+  return format;
+}
+function toNativeAudioStreamFormat(format) {
+  switch (format) {
+    case "mp3":
+      return NativeAudioStreamFormat.Mp3;
+    case "flac":
+      return NativeAudioStreamFormat.Flac;
+  }
+}
+function resolveContentTypePolicy(value, receiver) {
+  const policy = value ?? "validate";
+  if (policy !== "validate" && policy !== "ignore" && typeof policy !== "function") {
+    throw new TypeError("contentTypePolicy must be 'validate', 'ignore', or a function");
+  }
+  return typeof policy === "function" ? (context) => policy.call(receiver, context) : policy;
+}
+function isAllowedContentType(format, value) {
+  const contentType = value.split(";", 1)[0]?.trim().toLowerCase();
+  switch (format) {
+    case "mp3":
+      return ["audio/mpeg", "audio/mp3", "application/octet-stream", "application/mp3"].includes(contentType ?? "");
+    case "flac":
+      return ["audio/flac", "audio/x-flac", "application/octet-stream"].includes(contentType ?? "");
+  }
+}
+function createAudioStreamUrlConnector(source, request, format, contentTypePolicy) {
+  return {
+    async connect({ signal, attempt }) {
+      let response;
+      try {
+        const headers = new Headers(request?.headers);
+        if (!headers.has("icy-metadata"))
+          headers.set("Icy-MetaData", "1");
+        response = await globalThis.fetch(source, { ...request, headers, signal });
+      } catch (cause) {
+        throw new ClassifiedAudioStreamError("Audio stream fetch failed", { action: "fetch", attempt }, true, undefined, cause);
+      }
+      if (!response.ok) {
+        const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"), Number.POSITIVE_INFINITY);
+        await runBoundedCleanup(() => response.body?.cancel());
+        const retryable = [408, 425, 429].includes(response.status) || response.status >= 500 && response.status <= 599;
+        throw new ClassifiedAudioStreamError(`Audio stream request failed with HTTP ${response.status}`, { action: "response", status: response.status, attempt }, retryable, retryAfterMs);
+      }
+      const contentType = response.headers.get("content-type");
+      let contentTypeAccepted = contentType == null || contentTypePolicy === "ignore";
+      if (!contentTypeAccepted && contentTypePolicy === "validate") {
+        contentTypeAccepted = isAllowedContentType(format, contentType);
+      } else if (typeof contentTypePolicy === "function") {
+        try {
+          const result = contentTypePolicy(Object.freeze({
+            format,
+            contentType,
+            status: response.status,
+            url: response.url || String(source)
+          }));
+          if (typeof result !== "boolean")
+            throw new TypeError("contentTypePolicy must return a boolean");
+          contentTypeAccepted = result;
+        } catch (cause) {
+          await runBoundedCleanup(() => response.body?.cancel());
+          throw new ClassifiedAudioStreamError(cause instanceof Error ? cause.message : "Audio stream content type policy failed", { action: "response", status: response.status, attempt }, false, undefined, cause);
+        }
+      }
+      if (!contentTypeAccepted) {
+        await runBoundedCleanup(() => response.body?.cancel());
+        throw new ClassifiedAudioStreamError(`Unsupported audio stream Content-Type: ${contentType}`, { action: "response", status: response.status, attempt }, false);
+      }
+      if (response.body == null) {
+        throw new ClassifiedAudioStreamError("Audio stream response has no body", { action: "response", status: response.status, attempt }, true);
+      }
+      return {
+        body: response.body,
+        info: { headers: response.headers, status: response.status }
+      };
+    }
+  };
+}
+function resolveMetadataEncoding(value) {
+  try {
+    return new TextDecoder(value ?? "iso-8859-1").encoding;
+  } catch {
+    throw new TypeError(`Unsupported metadataEncoding: ${value}`);
+  }
+}
+function resolveAudioStreamRequest(request) {
+  if (request === undefined)
+    return;
+  const { body: _body, signal: _signal, ...safeRequest } = request;
+  return safeRequest;
+}
+function isReadableStreamSource(source) {
+  try {
+    return typeof source?.getReader === "function";
+  } catch {
+    return false;
+  }
+}
+function isAsyncIterableSource(source) {
+  try {
+    return typeof source?.[Symbol.asyncIterator] === "function";
+  } catch {
+    return false;
+  }
+}
+function isUint8Array(value) {
+  return ArrayBuffer.isView(value) && Object.prototype.toString.call(value) === "[object Uint8Array]";
+}
+var createAudioStream;
+var openAudioStream;
+
+class AudioStream extends EventEmitter {
+  closed;
+  format;
+  lib;
+  engine;
+  connector;
+  demuxerFactory;
+  readAction;
+  options;
+  removeFromOwner;
+  lifecycleController = new AbortController;
+  nativeStreamId = null;
+  nativeStats = null;
+  activeAttempt = null;
+  pendingCleanup = null;
+  reconnectAttempts = 0;
+  consecutiveReconnectAttempts = 0;
+  disposed = false;
+  exposed = false;
+  terminalError = null;
+  metadata = null;
+  pendingMetadataEvent = false;
+  metadataEventScheduled = false;
+  terminalEventScheduled = false;
+  setupResolve;
+  setupReject;
+  closedResolve;
+  setupPromise;
+  overallAbortListener = () => this.dispose();
+  static {
+    createAudioStream = (init) => new AudioStream(init);
+    openAudioStream = (stream) => stream.open();
+  }
+  constructor(init) {
+    super();
+    this.lib = init.lib;
+    this.engine = init.engine;
+    this.connector = init.connector;
+    this.demuxerFactory = init.demuxer;
+    this.readAction = init.readAction;
+    this.options = resolveAudioStreamOptions(init.options);
+    this.format = this.options.format;
+    this.removeFromOwner = init.removeFromOwner;
+    this.setupPromise = new Promise((resolve, reject) => (this.setupResolve = resolve, this.setupReject = reject));
+    this.closed = new Promise((resolve) => this.closedResolve = resolve);
+    this.options.signal?.addEventListener("abort", this.overallAbortListener, { once: true });
+  }
+  get state() {
+    if (this.disposed)
+      return "disposed";
+    if (this.terminalError != null)
+      return "errored";
+    return this.nativeStats == null ? "initializing" : NativeAudioStreamStateNames[this.nativeStats.state] ?? "errored";
+  }
+  async open() {
+    if (this.options.signal?.aborted)
+      this.dispose();
+    else
+      this.runLifecycle();
+    await this.setupPromise;
+    if (this.lifecycleController.signal.aborted && this.state !== "ended")
+      throw this.terminalError ?? createAbortError();
+    this.exposed = true;
+    if (this.pendingMetadataEvent && this.metadata != null)
+      this.emitMetadata();
+    this.pendingMetadataEvent = false;
+    if (this.state === "ended")
+      this.emitTerminal("ended");
+  }
+  getStats() {
+    const stats = this.readNativeStats();
+    if (!this.lifecycleController.signal.aborted && this.nativeStreamId != null) {
+      const error = this.snapshotError(stats);
+      const ended = stats?.state === NativeAudioStreamState.Ended && !this.options.reconnect?.retryOnEnd;
+      if (error != null || ended) {
+        queueMicrotask(() => {
+          if (this.lifecycleController.signal.aborted)
+            return;
+          const reason = error == null || error.context.action === "decoder" ? NativeAudioStreamCloseReason.PreserveNativeTerminal : NativeAudioStreamCloseReason.TransportError;
+          this.finish(reason, error ?? undefined);
+        });
+      }
+    }
+    return this.toPublicStats();
+  }
+  getMetadata() {
+    return this.metadata;
+  }
+  setVolume(volume) {
+    return this.control("setVolume", (streamId) => this.lib.audioSetStreamVolume(this.engine, streamId, volume));
+  }
+  setPan(pan) {
+    return this.control("setPan", (streamId) => this.lib.audioSetStreamPan(this.engine, streamId, pan));
+  }
+  setGroup(groupId) {
+    if (!isU32(groupId)) {
+      const context = { action: "setGroup" };
+      if (this.exposed) {
+        this.emitAsync("error", new AudioStreamError("Invalid audio stream group", context), context);
+      }
+      return false;
+    }
+    return this.control("setGroup", (streamId) => this.lib.audioSetStreamGroup(this.engine, streamId, groupId));
+  }
+  control(action, call) {
+    const streamId = this.nativeStreamId;
+    if (this.disposed || this.lifecycleController.signal.aborted || streamId == null)
+      return false;
+    const status = call(streamId);
+    if (status !== 0) {
+      const context = { action, status };
+      if (this.exposed) {
+        this.emitAsync("error", new AudioStreamError(`Audio stream ${action} failed: ${status}`, context), context);
+      }
+      return false;
+    }
+    return true;
+  }
+  dispose() {
+    if (this.disposed) {
+      if (this.nativeStreamId != null && this.closeNativeStream(NativeAudioStreamCloseReason.Disposed) === 0)
+        this.removeOwner();
+      return;
+    }
+    this.disposed = true;
+    const wasExposed = this.exposed;
+    this.lifecycleController.abort();
+    const cleanup = this.stopSource();
+    this.setupReject(createAbortError());
+    if (this.closeNativeStream(NativeAudioStreamCloseReason.Disposed) === 0)
+      this.removeOwner();
+    cleanup.finally(() => {
+      if (wasExposed && !this.terminalEventScheduled)
+        this.emitTerminal("disposed");
+      else if (!this.terminalEventScheduled)
+        this.closedResolve();
+    });
+  }
+  async runLifecycle() {
+    while (!this.lifecycleController.signal.aborted) {
+      const attempt = {
+        controller: new AbortController,
+        body: null,
+        closeConnection: null,
+        reader: null,
+        iterator: null,
+        demuxer: null,
+        demuxerFinished: false,
+        sourceReleased: false,
+        sourceAcquisitionAttempted: false,
+        connectionClosed: false,
+        demuxerAborted: false,
+        resourceAcquisition: null,
+        cleanupPromise: null
+      };
+      this.activeAttempt = attempt;
+      let connection;
+      try {
+        let returnedConnection;
+        const finishConnectionAcquisition = this.beginResourceAcquisition(attempt);
+        try {
+          returnedConnection = await this.connector.connect({
+            signal: attempt.controller.signal,
+            attempt: this.consecutiveReconnectAttempts
+          });
+        } finally {
+          finishConnectionAcquisition();
+        }
+        connection = this.resolveConnection(returnedConnection, attempt);
+      } catch (failure) {
+        const active = this.isAttemptActive(attempt);
+        await this.stopSource(attempt);
+        if (!active)
+          return;
+        const context = {
+          action: this.readAction,
+          attempt: this.consecutiveReconnectAttempts
+        };
+        const error2 = failure instanceof AudioStreamError ? failure : new AudioStreamError(failure instanceof Error ? failure.message : "Audio stream connection failed", context, failure);
+        if (await this.retry(error2, attempt, "connect"))
+          continue;
+        return;
+      }
+      if (!this.isAttemptActive(attempt)) {
+        await this.stopSource(attempt);
+        return;
+      }
+      if (!isReadableStreamSource(connection.body) && !isAsyncIterableSource(connection.body)) {
+        await this.stopSource(attempt);
+        const context = { action: "source" };
+        await this.finish(NativeAudioStreamCloseReason.TransportError, new AudioStreamError("Audio stream connection body must be a ReadableStream or AsyncIterable", context));
+        return;
+      }
+      if (!this.isAttemptActive(attempt)) {
+        await this.stopSource(attempt);
+        return;
+      }
+      let initialMetadata = null;
+      let demuxerFailed = false;
+      let demuxerFailure;
+      const finishDemuxerAcquisition = this.beginResourceAcquisition(attempt);
+      try {
+        attempt.demuxer = this.demuxerFactory?.(connection.info) ?? null;
+        initialMetadata = attempt.demuxer?.initialMetadata ?? null;
+      } catch (cause) {
+        demuxerFailed = true;
+        demuxerFailure = cause;
+      } finally {
+        finishDemuxerAcquisition();
+      }
+      if (demuxerFailed) {
+        await this.stopSource(attempt);
+        const error2 = demuxerFailure instanceof AudioStreamError ? demuxerFailure : new AudioStreamError(demuxerFailure instanceof Error ? demuxerFailure.message : "Audio stream demuxer creation failed", { action: "demuxer" }, demuxerFailure);
+        await this.finish(NativeAudioStreamCloseReason.TransportError, error2);
+        return;
+      }
+      if (!this.isAttemptActive(attempt)) {
+        await this.stopSource(attempt);
+        return;
+      }
+      this.publishMetadata(initialMetadata, attempt);
+      try {
+        this.createNativeStream();
+      } catch (cause) {
+        await this.stopSource(attempt);
+        const error2 = cause instanceof AudioStreamError ? cause : new AudioStreamError("Audio stream create failed", { action: "create" }, cause);
+        await this.finish(NativeAudioStreamCloseReason.TransportError, error2);
+        return;
+      }
+      try {
+        if (!await this.consumeSource(connection, attempt))
+          return;
+      } catch (cause) {
+        if (this.lifecycleController.signal.aborted)
+          return;
+        const error2 = cause instanceof AudioStreamError ? cause : cause instanceof TypeError && cause.message === INVALID_STREAM_CHUNK_MESSAGE ? cause : new AudioStreamError("Audio stream source failed", { action: "source" }, cause);
+        if (error2 instanceof ClassifiedAudioStreamError) {
+          if (await this.retry(error2, attempt, "read"))
+            continue;
+          return;
+        }
+        const context = error2 instanceof AudioStreamError ? error2.context : { action: "source" };
+        await this.finish(NativeAudioStreamCloseReason.TransportError, error2, context);
+        return;
+      }
+      if (!this.options.reconnect?.retryOnEnd) {
+        await this.finish(NativeAudioStreamCloseReason.PreserveNativeTerminal);
+        return;
+      }
+      const error = new AudioStreamError("Audio stream source ended", { action: "source" });
+      if (await this.retry(error, attempt, undefined, true))
+        continue;
+      return;
+    }
+  }
+  createNativeStream() {
+    if (this.nativeStreamId != null)
+      return;
+    const created = this.lib.audioCreateStream(this.engine, {
+      capacityMs: this.options.capacityMs,
+      startupMs: this.options.startupMs,
+      resumeMs: this.options.resumeMs,
+      maxProbeBytes: this.options.maxProbeBytes,
+      volume: this.options.volume,
+      pan: this.options.pan,
+      groupId: this.options.groupId,
+      format: toNativeAudioStreamFormat(this.options.format)
+    });
+    if (created.status !== 0 || created.streamId == null) {
+      const context = { action: "create", status: created.status };
+      throw new AudioStreamError(`Audio stream create failed: ${created.status}`, context);
+    }
+    this.nativeStreamId = created.streamId;
+  }
+  async consumeSource(connection, attempt) {
+    const initial = await this.pollNativeSnapshot(attempt);
+    if (initial == null || !this.isAttemptActive(attempt))
+      return false;
+    const decoderReady = this.awaitReady(attempt, initial.readyGeneration);
+    try {
+      await this.pumpSource(connection, attempt);
+    } catch (cause) {
+      this.observeReady(this.readNativeStats(), initial.readyGeneration);
+      await this.stopSource(attempt);
+      await decoderReady;
+      if (!this.lifecycleController.signal.aborted)
+        throw cause;
+      return false;
+    }
+    if (this.lifecycleController.signal.aborted)
+      return false;
+    const status = this.lib.audioEndStream(this.engine, this.nativeStreamId);
+    if (status !== 0) {
+      const nativeError = this.snapshotError(this.readNativeStats());
+      if (nativeError?.context.action === "decoder")
+        throw nativeError;
+      const context = { action: "end", status };
+      throw new AudioStreamError(`Audio stream end failed: ${status}`, context);
+    }
+    if (!await decoderReady || this.lifecycleController.signal.aborted)
+      return false;
+    if (!await this.awaitEnded(attempt))
+      return false;
+    await this.stopSource(attempt);
+    return !this.lifecycleController.signal.aborted;
+  }
+  async pumpSource(connection, attempt) {
+    const source = connection.body;
+    if (!this.isAttemptActive(attempt)) {
+      await this.runBoundedAttemptCleanup(attempt);
+      return;
+    }
+    const release = () => {
+      if (attempt.sourceReleased)
+        return;
+      if (attempt.reader == null) {
+        attempt.sourceReleased = true;
+        return;
+      }
+      try {
+        attempt.reader.releaseLock();
+        attempt.sourceReleased = true;
+      } catch {}
+    };
+    const next = () => attempt.reader == null ? attempt.iterator.next() : attempt.reader.read();
+    attempt.sourceAcquisitionAttempted = true;
+    const finishSourceAcquisition = this.beginResourceAcquisition(attempt);
+    try {
+      attempt.reader = isReadableStreamSource(source) ? source.getReader() : null;
+      attempt.iterator = attempt.reader == null ? source[Symbol.asyncIterator]() : null;
+    } catch (cause) {
+      const context = { action: this.readAction };
+      throw new ClassifiedAudioStreamError("Audio stream source failed", context, true, undefined, cause);
+    } finally {
+      finishSourceAcquisition();
+    }
+    if (!this.isAttemptActive(attempt)) {
+      await this.runBoundedAttemptCleanup(attempt);
+      return;
+    }
+    while (this.isAttemptActive(attempt)) {
+      let result;
+      try {
+        result = await next();
+      } catch (cause) {
+        const context = { action: this.readAction };
+        throw new ClassifiedAudioStreamError("Audio stream source failed", context, true, undefined, cause);
+      }
+      if (!this.isAttemptActive(attempt))
+        return;
+      if (result.done) {
+        release();
+        if (attempt.demuxer != null) {
+          try {
+            await this.processDemuxOutput(attempt.demuxer.flush(), attempt);
+          } catch (cause) {
+            if (cause instanceof AudioStreamError)
+              throw cause;
+            const context = { action: this.readAction };
+            throw new ClassifiedAudioStreamError(cause instanceof Error ? cause.message : "Audio stream demuxer flush failed", context, true, undefined, cause);
+          }
+        }
+        attempt.demuxerFinished = true;
+        await this.runBoundedAttemptCleanup(attempt);
+        return;
+      }
+      const chunk = result.value;
+      if (!isUint8Array(chunk))
+        throw new TypeError(INVALID_STREAM_CHUNK_MESSAGE);
+      if (chunk.byteLength === 0) {
+        await waitForDelay(0, attempt.controller.signal);
+        continue;
+      }
+      if (attempt.demuxer == null) {
+        await this.writeStreamChunk(chunk, attempt);
+        continue;
+      }
+      try {
+        await this.processDemuxOutput(attempt.demuxer.push(chunk), attempt);
+      } catch (cause) {
+        if (cause instanceof AudioStreamError)
+          throw cause;
+        throw new AudioStreamError(cause instanceof Error ? cause.message : "Audio stream demuxer failed", { action: "demuxer" }, cause);
+      }
+    }
+  }
+  async processDemuxOutput(outputs, attempt) {
+    for (const output of outputs) {
+      if (!this.isAttemptActive(attempt))
+        return;
+      if (output.type === "audio") {
+        if (!isUint8Array(output.data)) {
+          throw new AudioStreamError("Audio stream demuxer audio output must be a Uint8Array", {
+            action: "demuxer"
+          });
+        }
+        await this.writeStreamChunk(output.data, attempt);
+      } else if (output.type === "metadata") {
+        this.publishMetadata(output.metadata, attempt);
+      } else {
+        throw new AudioStreamError("Audio stream demuxer returned an invalid output", { action: "demuxer" });
+      }
+    }
+  }
+  async writeStreamChunk(chunk, attempt) {
+    let offset = 0;
+    while (offset < chunk.byteLength && this.isAttemptActive(attempt)) {
+      const streamId = this.nativeStreamId;
+      if (streamId == null)
+        return;
+      let accepted;
+      try {
+        accepted = this.lib.audioWriteStream(this.engine, streamId, chunk.subarray(offset));
+      } catch (cause) {
+        const context = { action: "write" };
+        throw new AudioStreamError("Audio stream write failed", context, cause);
+      }
+      if (accepted < 0) {
+        const context = { action: "write", status: accepted };
+        throw new AudioStreamError(`Audio stream write failed: ${accepted}`, context);
+      }
+      if (accepted === 0) {
+        if (await this.pollNativeSnapshot(attempt) == null)
+          return;
+        await waitForDelay(STREAM_POLL_INTERVAL_MS, attempt.controller.signal);
+        continue;
+      }
+      offset += accepted;
+    }
+  }
+  resolveConnection(connection, attempt) {
+    const finishAcquisition = this.beginResourceAcquisition(attempt);
+    try {
+      const close = connection.close;
+      if (close !== undefined && typeof close !== "function") {
+        throw new TypeError("Audio stream connection close must be a function");
+      }
+      attempt.closeConnection = close == null ? null : () => close.call(connection);
+      const info = connection.info;
+      const body = connection.body;
+      attempt.body = body;
+      return { body, info };
+    } finally {
+      finishAcquisition();
+    }
+  }
+  beginResourceAcquisition(attempt) {
+    let resolve;
+    const acquisition = new Promise((done) => {
+      resolve = done;
+    });
+    attempt.resourceAcquisition = acquisition;
+    return () => {
+      if (attempt.resourceAcquisition === acquisition)
+        attempt.resourceAcquisition = null;
+      resolve();
+    };
+  }
+  cleanupAttempt(attempt) {
+    if (attempt.cleanupPromise != null)
+      return attempt.cleanupPromise;
+    let resolveCleanup;
+    let rejectCleanup;
+    const cleanup = new Promise((resolve, reject) => {
+      resolveCleanup = resolve;
+      rejectCleanup = reject;
+    });
+    attempt.cleanupPromise = cleanup;
+    this.performAttemptCleanup(attempt).then(resolveCleanup, rejectCleanup);
+    const clearCleanup = () => {
+      if (attempt.cleanupPromise === cleanup)
+        attempt.cleanupPromise = null;
+    };
+    cleanup.then(clearCleanup, clearCleanup);
+    return cleanup;
+  }
+  async performAttemptCleanup(attempt) {
+    if (attempt.resourceAcquisition != null)
+      await attempt.resourceAcquisition;
+    const pending = [];
+    const reason = createAbortError();
+    if (!attempt.demuxerFinished && !attempt.demuxerAborted && attempt.demuxer != null) {
+      attempt.demuxerAborted = true;
+      try {
+        attempt.demuxer.abort?.(reason);
+      } catch {}
+    }
+    if (!attempt.sourceReleased) {
+      if (attempt.reader != null) {
+        attempt.sourceReleased = true;
+        try {
+          const result = attempt.reader.cancel(reason);
+          try {
+            attempt.reader.releaseLock();
+          } catch {}
+          pending.push(result);
+        } catch {}
+      } else if (attempt.iterator != null) {
+        attempt.sourceReleased = true;
+        try {
+          pending.push(Promise.resolve(attempt.iterator.return?.()));
+        } catch {}
+      } else if (attempt.body != null && !attempt.sourceAcquisitionAttempted) {
+        attempt.sourceReleased = true;
+        try {
+          if (isReadableStreamSource(attempt.body)) {
+            pending.push(attempt.body.cancel(reason));
+          } else if (isAsyncIterableSource(attempt.body)) {
+            attempt.iterator = attempt.body[Symbol.asyncIterator]();
+            pending.push(Promise.resolve(attempt.iterator.return?.()));
+          }
+        } catch {}
+      }
+    }
+    if (!attempt.connectionClosed && attempt.closeConnection != null) {
+      attempt.connectionClosed = true;
+      try {
+        pending.push(Promise.resolve(attempt.closeConnection()));
+      } catch {}
+    }
+    await Promise.allSettled(pending);
+  }
+  runBoundedAttemptCleanup(attempt) {
+    if (this.pendingCleanup != null)
+      return this.pendingCleanup;
+    let resolveCleanup;
+    let rejectCleanup;
+    const pendingCleanup = new Promise((resolve, reject) => {
+      resolveCleanup = resolve;
+      rejectCleanup = reject;
+    });
+    this.pendingCleanup = pendingCleanup;
+    const cleanup = runBoundedCleanup(() => this.cleanupAttempt(attempt));
+    cleanup.then(resolveCleanup, rejectCleanup);
+    const clearCleanup = () => {
+      if (this.pendingCleanup === pendingCleanup)
+        this.pendingCleanup = null;
+    };
+    pendingCleanup.then(clearCleanup, clearCleanup);
+    return pendingCleanup;
+  }
+  async retry(error, attempt, phase, cleanEnd = false) {
+    if (this.lifecycleController.signal.aborted)
+      return false;
+    const reconnect = this.options.reconnect;
+    const retryable = phase == null || !(error instanceof ClassifiedAudioStreamError) || error.retryable;
+    if (reconnect == null || this.consecutiveReconnectAttempts >= reconnect.maxRetries) {
+      if (cleanEnd)
+        await this.finish(NativeAudioStreamCloseReason.PreserveNativeTerminal);
+      else
+        await this.finish(NativeAudioStreamCloseReason.TransportError, error);
+      return false;
+    }
+    let retryDelayMs = error instanceof ClassifiedAudioStreamError ? error.retryAfterMs : undefined;
+    if (phase != null && reconnect.retry != null) {
+      let decision;
+      try {
+        decision = reconnect.retry(error, {
+          attempt: this.consecutiveReconnectAttempts + 1,
+          maxRetries: reconnect.maxRetries,
+          phase
+        });
+        if (decision !== false && (decision == null || typeof decision !== "object")) {
+          throw new TypeError("Audio stream retry policy must return false or a retry decision");
+        }
+      } catch (cause) {
+        await this.finish(NativeAudioStreamCloseReason.TransportError, new AudioStreamError("Audio stream retry policy failed", { action: "source" }, cause));
+        return false;
+      }
+      if (decision === false) {
+        await this.finish(NativeAudioStreamCloseReason.TransportError, error);
+        return false;
+      }
+      if (this.lifecycleController.signal.aborted)
+        return false;
+      let policyDelayMs;
+      try {
+        policyDelayMs = decision.delayMs;
+      } catch (cause) {
+        await this.finish(NativeAudioStreamCloseReason.TransportError, new AudioStreamError("Audio stream retry policy failed", { action: "source" }, cause));
+        return false;
+      }
+      if (policyDelayMs !== undefined && (!Number.isFinite(policyDelayMs) || !Number.isInteger(policyDelayMs) || policyDelayMs < 0)) {
+        await this.finish(NativeAudioStreamCloseReason.TransportError, new AudioStreamError("Audio stream retry delay must be a finite non-negative integer", {
+          action: "source"
+        }));
+        return false;
+      }
+      if (policyDelayMs !== undefined)
+        retryDelayMs = Math.min(reconnect.maxDelayMs, policyDelayMs);
+    } else if (!retryable) {
+      await this.finish(NativeAudioStreamCloseReason.TransportError, error);
+      return false;
+    }
+    if (retryDelayMs !== undefined)
+      retryDelayMs = Math.min(reconnect.maxDelayMs, retryDelayMs);
+    await this.cleanupAttempt(attempt);
+    if (this.lifecycleController.signal.aborted)
+      return false;
+    if (this.nativeStreamId != null) {
+      const nativeError = this.snapshotError(this.readNativeStats());
+      if (nativeError != null) {
+        const reason = nativeError.context.action === "decoder" ? NativeAudioStreamCloseReason.PreserveNativeTerminal : NativeAudioStreamCloseReason.TransportError;
+        await this.finish(reason, nativeError);
+        return false;
+      }
+      const restartStatus = this.lib.audioRestartStream(this.engine, this.nativeStreamId);
+      if (restartStatus !== 0) {
+        const restartContext = { action: "restart", status: restartStatus };
+        await this.finish(NativeAudioStreamCloseReason.TransportError, new AudioStreamError("Audio stream restart failed during reconnect", restartContext));
+        return false;
+      }
+      this.readNativeStats();
+    }
+    this.reconnectAttempts += 1;
+    this.consecutiveReconnectAttempts += 1;
+    const delayMs = retryDelayMs ?? Math.min(reconnect.maxDelayMs, reconnect.initialDelayMs * reconnect.backoffFactor ** (this.consecutiveReconnectAttempts - 1));
+    if (this.exposed) {
+      this.emitAsync("reconnecting", {
+        attempt: this.consecutiveReconnectAttempts,
+        delayMs,
+        maxRetries: reconnect.maxRetries,
+        error
+      });
+    }
+    return waitForDelay(delayMs, this.lifecycleController.signal).then(() => true).catch(() => false);
+  }
+  async awaitReady(attempt, previousGeneration) {
+    while (this.isAttemptActive(attempt)) {
+      const stats = await this.pollNativeSnapshot(attempt);
+      if (stats == null)
+        return false;
+      if (this.observeReady(stats, previousGeneration))
+        return true;
+      if (!await waitForPoll(attempt.controller.signal))
+        return false;
+    }
+    return false;
+  }
+  observeReady(stats, previousGeneration) {
+    if (stats == null || stats.readyGeneration === previousGeneration)
+      return false;
+    this.consecutiveReconnectAttempts = 0;
+    this.setupResolve();
+    return true;
+  }
+  async awaitEnded(attempt) {
+    while (this.isAttemptActive(attempt)) {
+      const stats = await this.pollNativeSnapshot(attempt);
+      if (stats == null)
+        return false;
+      if (stats.state === NativeAudioStreamState.Ended)
+        return true;
+      if (!await waitForPoll(attempt.controller.signal))
+        return false;
+    }
+    return false;
+  }
+  async pollNativeSnapshot(attempt) {
+    if (!this.isAttemptActive(attempt))
+      return null;
+    const stats = this.readNativeStats();
+    const error = this.snapshotError(stats);
+    if (error != null) {
+      const reason = error.context.action === "decoder" ? NativeAudioStreamCloseReason.PreserveNativeTerminal : NativeAudioStreamCloseReason.TransportError;
+      await this.finish(reason, error);
+      return null;
+    }
+    return stats;
+  }
+  snapshotError(stats) {
+    if (stats == null)
+      return new AudioStreamError("Audio stream stats failed", { action: "stats" });
+    if (NativeAudioStreamStateNames[stats.state] == null) {
+      return new AudioStreamError(`Unknown native audio stream state: ${stats.state}`, { action: "stats" });
+    }
+    if (stats.state !== NativeAudioStreamState.Failed && stats.state !== NativeAudioStreamState.Cancelled)
+      return null;
+    const context = { action: "decoder", errorCode: stats.errorCode };
+    return new AudioStreamError(stats.state === NativeAudioStreamState.Failed ? `Audio stream decoder failed: ${stats.errorCode}` : "Audio stream was cancelled by the decoder", context);
+  }
+  async finish(reason, error, context) {
+    if (this.lifecycleController.signal.aborted)
+      return;
+    if (error instanceof AudioStreamError)
+      context = error.context;
+    this.lifecycleController.abort();
+    this.terminalError = error ?? null;
+    const cleanup = this.stopSource();
+    const closeStatus = this.closeNativeStream(reason);
+    if (error == null && closeStatus !== 0) {
+      context = { action: "destroy", status: closeStatus };
+      error = new AudioStreamError("Audio stream destroy failed after end", context);
+      this.terminalError = error;
+    }
+    await cleanup;
+    if (error != null)
+      this.setupReject(error);
+    else
+      this.setupResolve();
+    if (closeStatus === 0)
+      this.removeOwner();
+    if (!this.disposed && this.exposed) {
+      if (error != null)
+        this.emitTerminal("error", error, context);
+      else
+        this.emitTerminal("ended");
+    } else if (error != null && !this.disposed)
+      this.closedResolve();
+  }
+  publishMetadata(metadata, attempt) {
+    if (!this.isAttemptActive(attempt) || Object.is(this.metadata, metadata))
+      return;
+    this.metadata = metadata;
+    if (!this.exposed) {
+      this.pendingMetadataEvent = true;
+      return;
+    }
+    this.emitMetadata();
+  }
+  emitMetadata() {
+    if (this.metadataEventScheduled)
+      return;
+    this.metadataEventScheduled = true;
+    setTimeout(() => {
+      this.metadataEventScheduled = false;
+      if (!this.disposed)
+        EventEmitter.prototype.emit.call(this, "metadata", this.metadata);
+    }, 0);
+  }
+  emitAsync(event, ...args) {
+    setTimeout(() => EventEmitter.prototype.emit.call(this, event, ...args), 0);
+  }
+  emitTerminal(event, ...args) {
+    if (this.terminalEventScheduled)
+      return;
+    this.terminalEventScheduled = true;
+    setTimeout(() => {
+      try {
+        EventEmitter.prototype.emit.call(this, event, ...args);
+      } finally {
+        this.closedResolve();
+      }
+    }, 0);
+  }
+  isAttemptActive(attempt) {
+    return !this.lifecycleController.signal.aborted && this.activeAttempt === attempt;
+  }
+  stopSource(attempt = this.activeAttempt) {
+    if (attempt == null)
+      return this.pendingCleanup ?? Promise.resolve();
+    if (this.activeAttempt === attempt)
+      this.activeAttempt = null;
+    attempt.controller.abort();
+    return this.runBoundedAttemptCleanup(attempt);
+  }
+  closeNativeStream(reason) {
+    const streamId = this.nativeStreamId;
+    if (streamId == null)
+      return 0;
+    const result = this.lib.audioCloseStream(this.engine, streamId, reason);
+    if (result.status !== 0 || result.stats == null)
+      return result.status === 0 ? -1 : result.status;
+    this.nativeStats = result.stats;
+    this.nativeStreamId = null;
+    return 0;
+  }
+  readNativeStats() {
+    if (this.nativeStreamId == null)
+      return this.nativeStats;
+    const stats = this.lib.audioGetStreamStats(this.engine, this.nativeStreamId);
+    if (stats != null)
+      this.nativeStats = stats;
+    return stats;
+  }
+  toPublicStats() {
+    const stats = this.nativeStats;
+    const sampleRate = stats?.sampleRate ?? 0;
+    const bufferedFrames = stats?.bufferedFrames ?? 0;
+    return {
+      state: this.state,
+      sampleRate,
+      channels: stats?.channels ?? 0,
+      bufferedFrames,
+      capacityFrames: stats?.capacityFrames ?? 0,
+      bufferedDurationMs: sampleRate === 0 ? 0 : bufferedFrames * 1000 / sampleRate,
+      bytesReceived: stats?.bytesReceived ?? 0n,
+      framesDecoded: stats?.framesDecoded ?? 0n,
+      framesPlayed: stats?.framesPlayed ?? 0n,
+      underruns: stats?.underruns ?? 0,
+      reconnectAttempts: this.reconnectAttempts
+    };
+  }
+  removeOwner() {
+    this.options.signal?.removeEventListener("abort", this.overallAbortListener);
+    this.removeFromOwner();
+  }
+}
 
 class Audio extends EventEmitter {
   static create(options = {}) {
-    return new Audio(resolveRenderLib(), options);
+    let lib;
+    try {
+      lib = resolveRenderLib();
+    } catch (cause) {
+      throw new AudioInitializationError("resolveRenderLib", "Failed to resolve the native audio library", undefined, cause);
+    }
+    return new Audio(lib, options);
   }
+  sampleRate;
   lib;
   defaultStartOptions;
   engine = null;
   groups = new Map;
+  streams = new Set;
   playbackStarted = false;
   mixerStarted = false;
+  disposing = false;
   constructor(lib, options) {
     super();
     this.lib = lib;
     this.defaultStartOptions = options.startOptions;
+    const normalizedSampleRate = options.sampleRate == null || !Number.isFinite(options.sampleRate) ? 0 : Math.min(MAX_U32, Math.max(0, Math.trunc(options.sampleRate)));
+    this.sampleRate = normalizedSampleRate || DEFAULT_AUDIO_SAMPLE_RATE;
     const createOptions = options.sampleRate == null && options.playbackChannels == null ? undefined : {
-      sampleRate: options.sampleRate == null ? undefined : Math.max(0, Math.trunc(options.sampleRate)),
+      sampleRate: options.sampleRate == null ? undefined : normalizedSampleRate,
       playbackChannels: options.playbackChannels == null ? undefined : Math.max(0, Math.trunc(options.playbackChannels))
     };
     this.engine = this.lib.createAudioEngine(createOptions);
     if (!this.engine) {
-      this.emitError("createAudioEngine", undefined, "Audio createAudioEngine returned null");
-      return;
+      throw new AudioInitializationError("createAudioEngine", "Audio createAudioEngine returned null");
     }
     if (options.autoStart ?? false) {
-      this.start(this.defaultStartOptions);
+      const status = this.lib.audioStart(this.engine, this.defaultStartOptions);
+      if (status !== 0) {
+        this.throwAfterInitializationCleanup(new AudioInitializationError("start", `Audio auto-start failed: ${status}`, status));
+      }
+      this.playbackStarted = true;
+      this.mixerStarted = true;
     }
+  }
+  throwAfterInitializationCleanup(error) {
+    const engine2 = this.engine;
+    this.engine = null;
+    if (engine2)
+      this.lib.destroyAudioEngine(engine2);
+    throw error;
   }
   emitError(action, status, message, cause) {
     const error = message ? new Error(message) : statusToError(action, status ?? -1);
@@ -2697,6 +3960,74 @@ class Audio extends EventEmitter {
       return null;
     }
     return result.voiceId;
+  }
+  async playStream(source, options = {}) {
+    const urlOptions = options;
+    if (urlOptions.request !== undefined || urlOptions.reconnect !== undefined || urlOptions.metadataEncoding !== undefined || urlOptions.contentTypePolicy !== undefined) {
+      return Promise.reject(new TypeError("request, reconnect, metadataEncoding, and contentTypePolicy options are only supported by playStreamUrl()"));
+    }
+    if (!isReadableStreamSource(source) && !isAsyncIterableSource(source)) {
+      return Promise.reject(new TypeError("Audio stream source must be a ReadableStream or AsyncIterable"));
+    }
+    const { demuxer, ...streamOptions } = options;
+    const connector = {
+      async connect() {
+        return { body: source, info: undefined };
+      }
+    };
+    return this.openStream(connector, demuxer == null ? undefined : () => demuxer(), streamOptions, "source");
+  }
+  async playStreamUrl(source, options = {}) {
+    if (options.demuxer !== undefined) {
+      throw new TypeError("demuxer is only supported by playStream() and playStreamSource()");
+    }
+    if (typeof source !== "string" && Object.prototype.toString.call(source) !== "[object URL]") {
+      return Promise.reject(new TypeError("Audio stream URL source must be a string or URL"));
+    }
+    const { request, metadataEncoding, reconnect, format, contentTypePolicy, ...streamOptions } = options;
+    const resolvedFormat = resolveAudioStreamFormat(format);
+    const resolvedContentTypePolicy = resolveContentTypePolicy(contentTypePolicy, options);
+    const encoding = resolveMetadataEncoding(metadataEncoding);
+    const connector = createAudioStreamUrlConnector(source, resolveAudioStreamRequest(request), resolvedFormat, resolvedContentTypePolicy);
+    return this.openStream(connector, (info) => {
+      try {
+        return selectAudioStreamDemuxer({ headers: info.headers, metadataEncoding: encoding });
+      } catch (cause) {
+        throw new AudioStreamError(cause instanceof Error ? cause.message : "Invalid audio stream metadata response", { action: "response", status: info.status }, cause);
+      }
+    }, { ...streamOptions, reconnect, format: resolvedFormat }, "fetch");
+  }
+  async playStreamSource(connector, options = {}) {
+    const urlOptions = options;
+    if (urlOptions.request !== undefined || urlOptions.metadataEncoding !== undefined || urlOptions.contentTypePolicy !== undefined) {
+      return Promise.reject(new TypeError("request, metadataEncoding, and contentTypePolicy are only supported by playStreamUrl()"));
+    }
+    const { demuxer, ...streamOptions } = options;
+    return this.openStream(connector, demuxer, streamOptions, "source");
+  }
+  async openStream(connector, demuxer, options, readAction) {
+    const engine2 = this.engine;
+    if (!engine2)
+      throw new Error("Audio engine unavailable during stream playback");
+    const resolvedConnector = resolveAudioStreamConnector(connector);
+    let stream;
+    stream = createAudioStream({
+      lib: this.lib,
+      engine: engine2,
+      connector: resolvedConnector,
+      demuxer,
+      options,
+      readAction,
+      removeFromOwner: () => this.streams.delete(stream)
+    });
+    this.streams.add(stream);
+    try {
+      await openAudioStream(stream);
+      return stream;
+    } catch (error) {
+      stream.dispose();
+      throw error;
+    }
   }
   stopVoice(voice) {
     const engine2 = this.engine;
@@ -2865,15 +4196,22 @@ class Audio extends EventEmitter {
     return stats;
   }
   dispose() {
-    if (!this.engine)
+    if (!this.engine || this.disposing)
       return;
-    if (this.mixerStarted) {
-      this.stop();
+    this.disposing = true;
+    try {
+      for (const stream of [...this.streams])
+        stream.dispose();
+      if (this.mixerStarted) {
+        this.stop();
+      }
+      this.groups.clear();
+      this.lib.destroyAudioEngine(this.engine);
+      this.engine = null;
+      this.emit("disposed");
+    } finally {
+      this.disposing = false;
     }
-    this.groups.clear();
-    this.lib.destroyAudioEngine(this.engine);
-    this.engine = null;
-    this.emit("disposed");
   }
 }
 function setupAudio(options = {}) {
@@ -6771,6 +8109,83 @@ var Nt = d.parseInline;
 var Ft = b.parse;
 var jt = x.lex;
 
+// src/renderables/text-table-width.ts
+function comparePriority(leftGrowth, leftCapacity, rightGrowth, rightCapacity) {
+  const left = leftGrowth * leftGrowth * rightCapacity;
+  const right = rightGrowth * rightGrowth * leftCapacity;
+  if (Number.isSafeInteger(left) && Number.isSafeInteger(right)) {
+    return left < right ? -1 : left > right ? 1 : 0;
+  }
+  const exactLeft = BigInt(leftGrowth) * BigInt(leftGrowth) * BigInt(rightCapacity);
+  const exactRight = BigInt(rightGrowth) * BigInt(rightGrowth) * BigInt(leftCapacity);
+  return exactLeft < exactRight ? -1 : exactLeft > exactRight ? 1 : 0;
+}
+function allocateProportionalColumnWidths(widths, targetWidth, minWidth) {
+  const baseWidths = widths.map((width) => Math.max(minWidth, Math.floor(width)));
+  const totalBaseWidth = baseWidths.reduce((sum, width) => sum + width, 0);
+  const capacity = baseWidths.map((width) => width - minWidth);
+  const growth = new Array(baseWidths.length).fill(0);
+  const available = Math.min(Math.max(0, targetWidth - minWidth * baseWidths.length), totalBaseWidth - minWidth * baseWidths.length);
+  if (available === 0)
+    return growth.map(() => minWidth);
+  if (available === capacity.reduce((sum, width) => sum + width, 0))
+    return baseWidths;
+  const weights = capacity.map(Math.sqrt);
+  const active = capacity.map((width, idx) => ({ idx, width, weight: weights[idx] })).filter((column) => column.width > 0).sort((a, b2) => a.weight - b2.weight);
+  if (active.length === capacity.length && capacity.every((width) => width === capacity[0])) {
+    const sharedGrowth = Math.floor(available / capacity.length);
+    const remainder = available % capacity.length;
+    return growth.map((_2, idx) => minWidth + sharedGrowth + (idx < remainder ? 1 : 0));
+  }
+  let remaining = available;
+  let totalWeight = active.reduce((sum, column) => sum + column.weight, 0);
+  for (const column of active) {
+    if (remaining / totalWeight <= column.weight)
+      break;
+    growth[column.idx] = column.width;
+    remaining -= column.width;
+    totalWeight -= column.weight;
+  }
+  const level = remaining / totalWeight;
+  for (const column of active) {
+    if (growth[column.idx] === column.width)
+      continue;
+    growth[column.idx] = Math.min(column.width, Math.floor(level * column.weight));
+  }
+  let allocatedGrowth = growth.reduce((sum, width) => sum + width, 0);
+  while (allocatedGrowth > available) {
+    let worstIdx = -1;
+    for (let idx = 0;idx < baseWidths.length; idx++) {
+      if (growth[idx] === 0)
+        continue;
+      const comparison = worstIdx === -1 ? 1 : comparePriority(growth[idx], capacity[idx], growth[worstIdx], capacity[worstIdx]);
+      if (comparison > 0 || comparison === 0 && idx > worstIdx) {
+        worstIdx = idx;
+      }
+    }
+    if (worstIdx === -1)
+      break;
+    growth[worstIdx] -= 1;
+    allocatedGrowth -= 1;
+  }
+  while (allocatedGrowth < available) {
+    let bestIdx = -1;
+    for (let idx = 0;idx < baseWidths.length; idx++) {
+      if (growth[idx] >= capacity[idx])
+        continue;
+      const comparison = bestIdx === -1 ? -1 : comparePriority(growth[idx] + 1, capacity[idx], growth[bestIdx] + 1, capacity[bestIdx]);
+      if (comparison < 0) {
+        bestIdx = idx;
+      }
+    }
+    if (bestIdx === -1)
+      break;
+    growth[bestIdx] += 1;
+    allocatedGrowth += 1;
+  }
+  return growth.map((width) => width + minWidth);
+}
+
 // src/renderables/TextTable.ts
 var MEASURE_HEIGHT = 1e4;
 
@@ -7324,54 +8739,7 @@ class TextTableRenderable extends Renderable {
   }
   fitColumnWidthsProportional(widths, targetContentWidth) {
     const minWidth = 1 + this.getHorizontalCellPadding();
-    const hardMinWidths = new Array(widths.length).fill(minWidth);
-    const baseWidths = widths.map((width) => Math.max(1, Math.floor(width)));
-    const preferredMinWidths = baseWidths.map((width) => Math.min(width, minWidth + 1));
-    const preferredMinTotal = preferredMinWidths.reduce((sum, width) => sum + width, 0);
-    const floorWidths = preferredMinTotal <= targetContentWidth ? preferredMinWidths : hardMinWidths;
-    const floorTotal = floorWidths.reduce((sum, width) => sum + width, 0);
-    const clampedTarget = Math.max(floorTotal, targetContentWidth);
-    const totalBaseWidth = baseWidths.reduce((sum, width) => sum + width, 0);
-    if (totalBaseWidth <= clampedTarget) {
-      return baseWidths;
-    }
-    const shrinkable = baseWidths.map((width, idx) => width - floorWidths[idx]);
-    const totalShrinkable = shrinkable.reduce((sum, value) => sum + value, 0);
-    if (totalShrinkable <= 0) {
-      return [...floorWidths];
-    }
-    const targetShrink = totalBaseWidth - clampedTarget;
-    const integerShrink = new Array(baseWidths.length).fill(0);
-    const fractions = new Array(baseWidths.length).fill(0);
-    let usedShrink = 0;
-    for (let idx = 0;idx < baseWidths.length; idx++) {
-      if (shrinkable[idx] <= 0)
-        continue;
-      const exact = shrinkable[idx] / totalShrinkable * targetShrink;
-      const whole = Math.min(shrinkable[idx], Math.floor(exact));
-      integerShrink[idx] = whole;
-      fractions[idx] = exact - whole;
-      usedShrink += whole;
-    }
-    let remainingShrink = targetShrink - usedShrink;
-    while (remainingShrink > 0) {
-      let bestIdx = -1;
-      let bestFraction = -1;
-      for (let idx = 0;idx < baseWidths.length; idx++) {
-        if (shrinkable[idx] - integerShrink[idx] <= 0)
-          continue;
-        if (fractions[idx] > bestFraction) {
-          bestFraction = fractions[idx];
-          bestIdx = idx;
-        }
-      }
-      if (bestIdx === -1)
-        break;
-      integerShrink[bestIdx] += 1;
-      fractions[bestIdx] = 0;
-      remainingShrink -= 1;
-    }
-    return baseWidths.map((width, idx) => Math.max(floorWidths[idx], width - integerShrink[idx]));
+    return allocateProportionalColumnWidths(widths, targetContentWidth, minWidth);
   }
   fitColumnWidthsBalanced(widths, targetContentWidth) {
     const minWidth = 1 + this.getHorizontalCellPadding();
@@ -11473,6 +12841,7 @@ export {
   reverse,
   resolveRenderLib,
   resolveCoreSlot,
+  resolveBundledFilePath,
   renderFontToFrameBuffer,
   registerEnvVar,
   registerCorePlugin,
@@ -11547,6 +12916,7 @@ export {
   createTerminalPalette,
   createSlotRegistry,
   createMarkdownCodeBlockRenderer,
+  createIcyStreamDemuxer,
   createExtmarksController,
   createCoreSlotRegistry,
   createCliRenderer,
@@ -11645,6 +13015,9 @@ export {
   OptimizedBuffer,
   NativeSpanFeed,
   NativeMeasureTargetKind,
+  NativeAudioStreamState2 as NativeAudioStreamState,
+  NativeAudioStreamFormat2 as NativeAudioStreamFormat,
+  NativeAudioStreamCloseReason2 as NativeAudioStreamCloseReason,
   MouseParser,
   MouseEvent,
   MouseButton,
@@ -11695,6 +13068,9 @@ export {
   BorderCharArrays,
   BloomEffect,
   BaseRenderable,
+  AudioStreamError,
+  AudioStream,
+  AudioInitializationError,
   Audio,
   ArrowRenderable,
   ATTRIBUTE_BASE_MASK,
@@ -11705,5 +13081,5 @@ export {
   ACHROMATOPSIA_MATRIX
 };
 
-//# debugId=9FCFC4351B1344F964756E2164756E21
-//# sourceMappingURL=index.js.map
+//# debugId=6C6DF101A7D9933A64756E2164756E21
+//# sourceMappingURL=index.node.js.map

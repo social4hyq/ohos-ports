@@ -2,18 +2,46 @@ name: Publish @ohos-ports/opentui-core
 
 # No build step: this package reuses the upstream @opentui/core-linux-arm64-musl
 # libopentui.so as-is (OHOS is musl-ABI-compatible, verified by dlopen + FFI call
-# on a real OHOS device) with a patched resolveNativePackage() that adds an
-# openharmony branch pointing at the bundled .so. The .so itself is committed
-# to this repo (already stripped + self-signed), so publish is just `npm publish`.
+# on a real OHOS device) with a patched resolveNativeLibraryPath() that adds an
+# openharmony branch pointing at the bundled .so (bun path: chunk-bun-t2myhmwd.js;
+# node path: chunk-node-q0cwyvm9.js), plus an `openharmony` entry in each file's
+# NATIVE_FILE_NAMES so getNativeAssetDescriptor() doesn't throw before reaching
+# that branch. The .so itself is committed to this repo (already stripped +
+# self-signed), so publish is just `npm publish`.
+#
+# IMPORTANT — this job runs on ubuntu-latest (x86_64 glibc). It CANNOT execute
+# libopentui.so (aarch64, OHOS musl ABI) or dlopen it, so nothing here is a
+# functional test. All checks below are static (file/grep/ELF-header parsing).
+# The only real functional test — bun install this package + resolveRenderLib()
+# actually dlopen-ing the lib, both un-bundled AND after `bun build --compile`
+# (the file-loader embedding only gets exercised in compile mode) — has to run
+# on a real OHOS device or the OHOS container BEFORE you dispatch this workflow.
+# npm has no "republish over an existing version" escape hatch, so a version
+# published broken stays broken forever (next fix needs a new version number);
+# the `smoke_tested` input below exists so a run can't reach `npm publish`
+# without an explicit human attestation that the manual functional test above
+# was actually done.
 #
 # To refresh from a newer upstream @opentui/core release: download both the
 # @opentui/core@<ver> and @opentui/core-linux-arm64-musl@<ver> tarballs, copy
-# the new base + .so into packages/opentui-core/, re-apply the openharmony
-# branch patch to resolveNativePackage() in the new hashed bundle file, strip +
-# self-sign the .so again, commit, then run this workflow.
+# the new base + .so into packages/opentui-core/ (diff the old vs new file
+# lists first — upstream renames the hashed chunk files every release, so
+# stale ones from the previous version must be removed, not just overwritten),
+# re-apply the NATIVE_FILE_NAMES + resolveNativeLibraryPath openharmony
+# branches to the new chunk files, strip + self-sign the .so again, run the
+# manual functional test (see above), commit, then run this workflow.
 
 on:
   workflow_dispatch:
+    inputs:
+      smoke_tested:
+        description: >-
+          I ran the manual functional smoke test (bun install + resolveRenderLib()
+          dlopen, both un-bundled and after `bun build --compile`) on a real OHOS
+          device or the OHOS container, against this exact commit, and it passed.
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -23,6 +51,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Require smoke-test attestation
+        if: ${{ inputs.smoke_tested != true }}
+        run: |
+          echo "::error::smoke_tested input is not checked — this workflow cannot verify the .so functionally (wrong host arch/ABI). Run the manual test on-device/container first, then re-dispatch with smoke_tested=true."
+          exit 1
+
       - uses: actions/checkout@v4
 
       - name: Set up Node.js
@@ -31,12 +65,58 @@ jobs:
           node-version: 20
           registry-url: https://registry.npmjs.org/
 
-      - name: Verify package contents
+      - name: Verify package contents (static only — see header comment)
         working-directory: packages/opentui-core
         run: |
+          set -euo pipefail
+
           test -f libopentui.so
-          node -e "console.log(require('./package.json').name)" | grep -q '@ohos-ports/opentui-core'
-          grep -q 'process.platform === "openharmony"' index-d5xqskty.js
+          NAME=$(node -e "console.log(require('./package.json').name)")
+          [ "$NAME" = "@ohos-ports/opentui-core" ]
+
+          # Syntax-validate every patched/vendored JS file (catches malformed
+          # edits before they reach a real device).
+          for f in *.js; do
+            node --check "$f"
+          done
+
+          for f in chunk-bun-t2myhmwd.js chunk-node-q0cwyvm9.js; do
+            grep -q 'openharmony: "libopentui.so"' "$f"
+            grep -q 'process.platform === "openharmony"' "$f"
+          done
+          # No stale hashed-chunk files from a previous upstream version left behind.
+          ls index-*.js 2>/dev/null && { echo "::error::stale hashed index-*.js from a prior version"; exit 1; } || true
+
+          # ELF header/section parsing works cross-arch (it doesn't execute the
+          # binary) — confirm this is really an aarch64 .so with a .codesign
+          # section (OHOS self-sign), not an unsigned or wrong-arch leftover.
+          readelf -h libopentui.so | grep -q 'AArch64'
+          readelf -S libopentui.so | grep -q '\.codesign'
+
+          # version consistency: package.json's own version must match every
+          # @opentui/core-* optionalDependencies entry, or this is a half-done bump.
+          node -e '
+            const pkg = require("./package.json");
+            const v = pkg.version;
+            for (const [name, range] of Object.entries(pkg.optionalDependencies ?? {})) {
+              if (name.startsWith("@opentui/core-") && range !== v) {
+                console.error(`optionalDependencies["${name}"] = ${range}, expected ${v}`);
+                process.exit(1);
+              }
+            }
+          '
+
+          # This exact version must not already be on the registry — npm publish
+          # would reject it anyway, but this fails earlier with an unambiguous message.
+          PKG_VERSION=$(node -e "console.log(require('./package.json').version)")
+          if npm view "@ohos-ports/opentui-core@$PKG_VERSION" version >/dev/null 2>&1; then
+            echo "::error::@ohos-ports/opentui-core@$PKG_VERSION is already published — bump the version"
+            exit 1
+          fi
+
+      - name: Preview publish contents
+        working-directory: packages/opentui-core
+        run: npm pack --dry-run
 
       - name: Publish to npm
         working-directory: packages/opentui-core

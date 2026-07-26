@@ -13,7 +13,7 @@ patched to recognize `process.platform === "openharmony"`.
 
 | Package | Reuses | Notes |
 |---|---|---|
-| `packages/opentui-core` | `@opentui/core-linux-arm64-musl`'s `libopentui.so` (Zig, dlopen via `bun:ffi`) | Verified: dlopen + FFI call succeeds on real OHOS aarch64 hardware |
+| `packages/opentui-core` | `@opentui/core-linux-arm64-musl@0.4.5`'s `libopentui.so` (Zig, dlopen via `bun:ffi`) | Verified: dlopen + FFI call succeeds on real OHOS aarch64 hardware |
 
 ## Why bundle instead of depend on the real platform package?
 

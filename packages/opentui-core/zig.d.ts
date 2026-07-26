@@ -1,10 +1,31 @@
 import { type FFICallbackInstance, type Pointer } from "./platform/ffi.js";
 import { type CursorStyle, type CursorStyleOptions, type TargetChannel, type DebugOverlayCorner, type WidthMethod, type TerminalCapabilities, type Highlight, type LineInfo } from "./types.js";
-export type { LineInfo, AllocatorStats, BuildOptions, NativeRenderStats };
+export type { LineInfo, AllocatorStats, AudioStreamCreateOptions, BuildOptions, NativeAudioStreamStats, NativeRenderStats, };
 import { RGBA } from "./lib/RGBA.js";
 import { OptimizedBuffer } from "./buffer.js";
 import { TextBuffer } from "./text-buffer.js";
-import type { NativeSpanFeedOptions, NativeSpanFeedStats, ReserveInfo, AudioCreateOptions, AudioStartOptions, AudioVoiceOptions, AudioStats, BuildOptions, AllocatorStats, NativeRenderStats } from "./zig-structs.js";
+import type { NativeSpanFeedOptions, NativeSpanFeedStats, ReserveInfo, AudioCreateOptions, AudioStartOptions, AudioVoiceOptions, AudioStreamCreateOptions, NativeAudioStreamCloseReason as NativeAudioStreamCloseReasonType, NativeAudioStreamFormat as NativeAudioStreamFormatType, NativeAudioStreamState as NativeAudioStreamStateType, NativeAudioStreamStats, AudioStats, BuildOptions, AllocatorStats, NativeRenderStats } from "./zig-structs.js";
+export declare const NativeAudioStreamState: {
+    readonly Initializing: 0;
+    readonly Buffering: 1;
+    readonly Playing: 2;
+    readonly Ended: 3;
+    readonly Failed: 4;
+    readonly Cancelled: 5;
+    readonly Reconnecting: 6;
+};
+export type NativeAudioStreamState = NativeAudioStreamStateType;
+export declare const NativeAudioStreamCloseReason: {
+    readonly PreserveNativeTerminal: 0;
+    readonly TransportError: 1;
+    readonly Disposed: 2;
+};
+export type NativeAudioStreamCloseReason = NativeAudioStreamCloseReasonType;
+export declare const NativeAudioStreamFormat: {
+    readonly Mp3: 1;
+    readonly Flac: 2;
+};
+export type NativeAudioStreamFormat = NativeAudioStreamFormatType;
 export type NativeHandle<T extends string> = Pointer & {
     readonly __nativeHandle: T;
 };
@@ -90,6 +111,21 @@ export interface AudioEngineLib {
     audioStart: (engine: AudioEngineHandle, options?: AudioStartOptions | null) => number;
     audioStartMixer: (engine: AudioEngineHandle) => number;
     audioStop: (engine: AudioEngineHandle) => number;
+    audioCreateStream: (engine: AudioEngineHandle, options: AudioStreamCreateOptions) => {
+        status: number;
+        streamId: number | null;
+    };
+    audioWriteStream: (engine: AudioEngineHandle, streamId: number, data: Uint8Array) => number;
+    audioEndStream: (engine: AudioEngineHandle, streamId: number) => number;
+    audioRestartStream: (engine: AudioEngineHandle, streamId: number) => number;
+    audioSetStreamVolume: (engine: AudioEngineHandle, streamId: number, volume: number) => number;
+    audioSetStreamPan: (engine: AudioEngineHandle, streamId: number, pan: number) => number;
+    audioSetStreamGroup: (engine: AudioEngineHandle, streamId: number, groupId: number) => number;
+    audioGetStreamStats: (engine: AudioEngineHandle, streamId: number) => NativeAudioStreamStats | null;
+    audioCloseStream: (engine: AudioEngineHandle, streamId: number, reason: NativeAudioStreamCloseReason) => {
+        status: number;
+        stats: NativeAudioStreamStats | null;
+    };
     audioLoad: (engine: AudioEngineHandle, data: Uint8Array) => {
         status: number;
         soundId: number | null;

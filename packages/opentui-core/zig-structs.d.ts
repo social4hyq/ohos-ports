@@ -199,6 +199,51 @@ export type AudioVoiceOptions = {
     loop?: boolean;
     groupId?: number;
 };
+export declare const NativeAudioStreamFormat: {
+    readonly Mp3: 1;
+    readonly Flac: 2;
+};
+export type NativeAudioStreamFormat = (typeof NativeAudioStreamFormat)[keyof typeof NativeAudioStreamFormat];
+export type AudioStreamCreateOptions = {
+    capacityMs: number;
+    startupMs: number;
+    resumeMs: number;
+    volume: number;
+    pan: number;
+    groupId: number;
+    maxProbeBytes: number;
+    format: NativeAudioStreamFormat;
+};
+export type NativeAudioStreamStats = {
+    bytesReceived: bigint;
+    framesDecoded: bigint;
+    framesPlayed: bigint;
+    state: number;
+    sampleRate: number;
+    channels: number;
+    bufferedFrames: number;
+    capacityFrames: number;
+    underruns: number;
+    errorCode: number;
+    readyGeneration: number;
+};
+export declare const NativeAudioStreamState: {
+    readonly Initializing: 0;
+    readonly Buffering: 1;
+    readonly Playing: 2;
+    readonly Ended: 3;
+    readonly Failed: 4;
+    readonly Cancelled: 5;
+    readonly Reconnecting: 6;
+};
+export type NativeAudioStreamState = (typeof NativeAudioStreamState)[keyof typeof NativeAudioStreamState];
+export declare const NativeAudioStreamStateNames: readonly ["initializing", "buffering", "playing", "ended", "errored", "disposed", "reconnecting"];
+export declare const NativeAudioStreamCloseReason: {
+    readonly PreserveNativeTerminal: 0;
+    readonly TransportError: 1;
+    readonly Disposed: 2;
+};
+export type NativeAudioStreamCloseReason = (typeof NativeAudioStreamCloseReason)[keyof typeof NativeAudioStreamCloseReason];
 export type AudioStats = {
     soundsLoaded: number;
     voicesActive: number;
@@ -252,5 +297,7 @@ export declare const AudioVoiceOptionsStruct: import("bun-ffi-structs").DefineSt
 }], readonly ["groupId", "u32", {
     readonly default: 0;
 }]], {}>;
+export declare const AudioStreamCreateOptionsStruct: import("bun-ffi-structs").DefineStructReturnType<[readonly ["capacityMs", "u32"], readonly ["startupMs", "u32"], readonly ["resumeMs", "u32"], readonly ["volume", "f32"], readonly ["pan", "f32"], readonly ["groupId", "u32"], readonly ["maxProbeBytes", "u32"], readonly ["format", "u32"]], {}>;
+export declare const AudioStreamStatsStruct: import("bun-ffi-structs").DefineStructReturnType<[readonly ["bytesReceived", "u64"], readonly ["framesDecoded", "u64"], readonly ["framesPlayed", "u64"], readonly ["state", "u32"], readonly ["sampleRate", "u32"], readonly ["channels", "u32"], readonly ["bufferedFrames", "u32"], readonly ["capacityFrames", "u32"], readonly ["underruns", "u32"], readonly ["errorCode", "i32"], readonly ["readyGeneration", "u32"]], {}>;
 export declare const AudioStatsStruct: import("bun-ffi-structs").DefineStructReturnType<[readonly ["soundsLoaded", "u32"], readonly ["voicesActive", "u32"], readonly ["framesMixed", "u64"], readonly ["lockMisses", "u32"], readonly ["lastPeak", "f32"], readonly ["lastRms", "f32"]], {}>;
 export {};
