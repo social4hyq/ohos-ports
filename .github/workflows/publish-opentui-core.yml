@@ -93,18 +93,37 @@ jobs:
           readelf -h libopentui.so | grep -q 'AArch64'
           readelf -S libopentui.so | grep -q '\.codesign'
 
-          # version consistency: package.json's own version must match every
-          # @opentui/core-* optionalDependencies entry, or this is a half-done bump.
+          # version consistency: every @opentui/core-* optionalDependencies entry
+          # must match the upstream base version (version before any -patch.* or
+          # pre-release suffix), since they reference real upstream platform pkgs.
+          # The package's own version may carry a -patch.N suffix for OHOS-port
+          # bugfixes that don't correspond to a new upstream release.
           node -e '
             const pkg = require("./package.json");
-            const v = pkg.version;
+            const base = pkg.version.replace(/-.*$/, "");
             for (const [name, range] of Object.entries(pkg.optionalDependencies ?? {})) {
-              if (name.startsWith("@opentui/core-") && range !== v) {
-                console.error(`optionalDependencies["${name}"] = ${range}, expected ${v}`);
+              if (name.startsWith("@opentui/core-") && range !== base) {
+                console.error(`optionalDependencies["${name}"] = ${range}, expected ${base}`);
                 process.exit(1);
               }
             }
           '
+
+          # Self-reference guard: this package is consumed via npm alias override
+          # (@opentui/core -> npm:@ohos-ports/opentui-core), so bare "@opentui/core"
+          # imports inside its own .js files are unresolvable under bun/pnpm's
+          # isolated store. They must use relative paths instead. Upstream
+          # rewrites these on every version bump, so this catches regressions.
+          # Catches both static (from "…") and dynamic (import("…")/require("…"))
+          # self-imports of the bare "@opentui/core" specifier or its subpaths.
+          # The ["\/] after "core" excludes real upstream platform packages
+          # like "@opentui/core-linux-arm64-musl" (hyphen, not quote/slash).
+          BAD=$(grep -rnE '(from|import\\(|require\\()"@opentui/core["\\/]' *.js || true)
+          if [ -n "$BAD" ]; then
+            echo "::error::Bare @opentui/core self-import found (breaks npm alias override resolution):"
+            echo "$BAD"
+            exit 1
+          fi
 
           # This exact version must not already be on the registry — npm publish
           # would reject it anyway, but this fails earlier with an unambiguous message.
