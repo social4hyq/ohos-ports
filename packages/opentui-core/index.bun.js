@@ -44,7 +44,7 @@ import {
   mergeKeyAliases,
   mergeKeyBindings,
   wrapWithDelegates
-} from "./chunk-bun-tkm837n2.js";
+} from "./chunk-bun-t68f2fmr.js";
 import {
   ASCIIFontSelectionHelper,
   ATTRIBUTE_BASE_BITS,
@@ -72,6 +72,12 @@ import {
   NativeAudioStreamState,
   NativeAudioStreamState1 as NativeAudioStreamState2,
   NativeAudioStreamStateNames,
+  NativeClipboardCancelStatus,
+  NativeClipboardCopyStatus,
+  NativeClipboardDestroyStatus,
+  NativeClipboardOperationStatus,
+  NativeClipboardShutdownStatus,
+  NativeClipboardStartStatus,
   NativeMeasureTargetKind,
   OptimizedBuffer,
   PasteEvent,
@@ -115,7 +121,10 @@ import {
   clearEnvCache,
   convertGlobalToLocalSelection,
   coordinateToCharacterIndex,
+  createClipboard,
   createExtmarksController,
+  createHostClipboard,
+  createRendererClipboardAdapter,
   createTerminalPalette,
   createTextAttributes,
   cyan,
@@ -188,13 +197,14 @@ import {
   stripAnsiSequences,
   t,
   terminalNamedSingleStrokeKeys,
+  toArrayBuffer,
   treeSitterToStyledText,
   treeSitterToTextChunks,
   underline,
   visualizeRenderableTree,
   white,
   yellow
-} from "./chunk-bun-t2myhmwd.js";
+} from "./chunk-bun-26r5c5w5.js";
 // src/post/effects.ts
 function toU8(value) {
   return Math.round(Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0)) * 255);
@@ -2534,7 +2544,9 @@ class SlotRenderable extends Renderable {
 }
 // src/audio.ts
 import { EventEmitter } from "events";
-import { readFile } from "fs/promises";
+import { randomBytes } from "crypto";
+import { open as openFile, readFile, rename, unlink } from "fs/promises";
+import { basename, dirname, join } from "path";
 
 // src/audio-stream/icy/metadata.ts
 function parseIcyMetadata(bytes, decoder) {
@@ -2695,6 +2707,28 @@ class AudioInitializationError extends Error {
       this.cause = cause;
   }
 }
+
+class AudioCaptureStreamError extends Error {
+  context;
+  constructor(message, context, cause) {
+    super(message);
+    this.name = "AudioCaptureStreamError";
+    this.context = context;
+    if (cause !== undefined)
+      this.cause = cause;
+  }
+}
+
+class AudioRecorderError extends Error {
+  context;
+  constructor(message, context, cause) {
+    super(message);
+    this.name = "AudioRecorderError";
+    this.context = context;
+    if (cause !== undefined)
+      this.cause = cause;
+  }
+}
 function statusToError(action, status) {
   return new Error(`Audio ${action} failed: ${status}`);
 }
@@ -2706,6 +2740,10 @@ var DEFAULT_STREAM_PROBE_BYTES = 1024 * 1024;
 var STREAM_POLL_INTERVAL_MS = 5;
 var MAX_TIMER_DELAY_MS = 2147483647;
 var MAX_U32 = 4294967295;
+var DEFAULT_CAPTURE_CHUNK_FRAMES = 2048;
+var CAPTURE_DISCARD_BATCH_CHUNKS = 32;
+var WAV_HEADER_BYTES = 44;
+var MAX_WAV_DATA_BYTES = BigInt(MAX_U32 - 36);
 var INVALID_STREAM_CHUNK_MESSAGE = "Audio stream chunks must be Uint8Array instances";
 
 class AudioStreamError extends Error {
@@ -2740,6 +2778,32 @@ function resolvePositiveU32(value, fallback, name) {
   if (resolved > MAX_U32)
     throw new RangeError(`${name} exceeds the supported limit`);
   return resolved;
+}
+function resolveAudioCaptureStreamOptions(options, sampleRate) {
+  const channels = resolvePositiveU32(options.channels, 1, "channels");
+  const capacityFrames = resolvePositiveU32(options.capacityFrames, sampleRate, "capacityFrames");
+  const chunkFrames = resolvePositiveU32(options.chunkFrames, DEFAULT_CAPTURE_CHUNK_FRAMES, "chunkFrames");
+  if (chunkFrames > capacityFrames)
+    throw new RangeError("chunkFrames must not exceed capacityFrames");
+  if (chunkFrames > Math.floor(MAX_U32 / channels)) {
+    throw new RangeError("chunkFrames * channels exceeds the supported limit");
+  }
+  return {
+    sampleRate,
+    channels,
+    capacityFrames,
+    chunkFrames,
+    startOptions: options.startOptions,
+    signal: options.signal
+  };
+}
+function resolveU32Index(value, name) {
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+    throw new TypeError(`${name} must be a finite non-negative integer`);
+  }
+  if (value > MAX_U32)
+    throw new RangeError(`${name} exceeds the supported limit`);
+  return value;
 }
 function resolveReconnectOptions(options) {
   const maxRetries = options.maxRetries ?? Number.POSITIVE_INFINITY;
@@ -3095,18 +3159,21 @@ class AudioStream extends EventEmitter {
     return true;
   }
   dispose() {
-    if (this.disposed) {
-      if (this.nativeStreamId != null && this.closeNativeStream(NativeAudioStreamCloseReason.Disposed) === 0)
-        this.removeOwner();
-      return;
-    }
-    this.disposed = true;
     const wasExposed = this.exposed;
-    this.lifecycleController.abort();
+    if (!this.disposed) {
+      this.disposed = true;
+      this.lifecycleController.abort();
+      this.setupReject(createAbortError());
+    }
     const cleanup = this.stopSource();
-    this.setupReject(createAbortError());
-    if (this.closeNativeStream(NativeAudioStreamCloseReason.Disposed) === 0)
-      this.removeOwner();
+    const closeStatus = this.closeNativeStream(NativeAudioStreamCloseReason.Disposed);
+    if (closeStatus !== 0) {
+      throw new AudioStreamError(`Audio stream destroy failed: ${closeStatus}`, {
+        action: "destroy",
+        status: closeStatus
+      });
+    }
+    this.removeOwner();
     cleanup.finally(() => {
       if (wasExposed && !this.terminalEventScheduled)
         this.emitTerminal("disposed");
@@ -3774,6 +3841,962 @@ class AudioStream extends EventEmitter {
     this.removeFromOwner();
   }
 }
+var createAudioCaptureStream;
+var openAudioCaptureStream;
+var refreshAudioCaptureStreamFinalStats;
+
+class AudioCaptureStream extends EventEmitter {
+  readable;
+  sampleRate;
+  channels;
+  chunkFrames;
+  closed;
+  init;
+  lifecycleController = new AbortController;
+  streamController = null;
+  nativeStats;
+  currentState = "initializing";
+  pendingFrames = 0;
+  pendingSamples;
+  producerStopAttempted = false;
+  producerStopped = false;
+  producerMayBeRunning = false;
+  ownerRemoved = false;
+  exposed = false;
+  terminal = false;
+  discardRequested = false;
+  discardDecisionScheduled = false;
+  pumpPromise = null;
+  producerCleanupPromise = null;
+  lastCleanupFailure = null;
+  terminalCompletionPromise = null;
+  closedResolve;
+  signalAbortListener = () => this.dispose();
+  static {
+    createAudioCaptureStream = (init) => new AudioCaptureStream(init);
+    openAudioCaptureStream = (stream) => stream.open();
+    refreshAudioCaptureStreamFinalStats = (stream) => stream.refreshFinalStats();
+  }
+  constructor(init) {
+    super();
+    this.init = init;
+    this.sampleRate = init.options.sampleRate;
+    this.channels = init.options.channels;
+    this.chunkFrames = init.options.chunkFrames;
+    this.pendingSamples = new Float32Array(this.chunkFrames * this.channels);
+    this.nativeStats = {
+      sampleRate: this.sampleRate,
+      channels: this.channels,
+      capacityFrames: init.options.capacityFrames,
+      bufferedFrames: 0,
+      framesReceived: 0n,
+      framesRead: 0n,
+      framesDropped: 0n
+    };
+    this.closed = new Promise((resolve) => this.closedResolve = resolve);
+    this.readable = new ReadableStream({
+      start: (controller) => {
+        this.streamController = controller;
+      },
+      pull: () => this.pull(),
+      cancel: () => this.disposeInternal(true)
+    }, { highWaterMark: 0 });
+    this.init.options.signal?.addEventListener("abort", this.signalAbortListener, { once: true });
+  }
+  get state() {
+    return this.currentState;
+  }
+  async open() {
+    if (this.init.options.signal?.aborted) {
+      await this.disposeInternal(false);
+      throw createAbortError();
+    }
+    let result;
+    this.producerMayBeRunning = true;
+    try {
+      result = this.init.start();
+    } catch (cause) {
+      this.currentState = "errored";
+      await this.cleanupProducer();
+      this.closedResolve();
+      throw new AudioCaptureStreamError("Audio capture stream start failed", { action: "start" }, cause);
+    }
+    if (result.status !== 0) {
+      this.producerMayBeRunning = false;
+      this.currentState = "errored";
+      this.removeOwner();
+      this.closedResolve();
+      throw this.operationError("start", result);
+    }
+    if (this.terminal || this.init.options.signal?.aborted) {
+      await (this.terminalCompletionPromise ?? this.disposeInternal(false));
+      throw createAbortError();
+    }
+    let stats;
+    try {
+      stats = this.init.stats();
+    } catch (cause) {
+      stats = { status: -1, stats: null, cause };
+    }
+    if (stats.status !== 0 || stats.stats == null) {
+      this.currentState = "errored";
+      await this.cleanupProducer();
+      this.closedResolve();
+      throw this.operationError("stats", stats);
+    }
+    this.nativeStats = stats.stats;
+    if (this.terminal || this.init.options.signal?.aborted) {
+      await (this.terminalCompletionPromise ?? this.disposeInternal(false));
+      throw createAbortError();
+    }
+    this.currentState = "capturing";
+    this.exposed = true;
+  }
+  getStats() {
+    if (!this.terminal) {
+      const stats = this.refreshStats();
+      if (stats != null && !this.observeProducer())
+        this.scheduleDiscardIfIdle();
+    }
+    return this.publicStats();
+  }
+  stop() {
+    if (this.terminal || this.currentState === "stopping")
+      return;
+    this.currentState = "stopping";
+    const result = this.stopProducer();
+    if (result != null && result.status !== 0)
+      this.fail(this.operationError("stop", result));
+    else
+      this.scheduleDiscardIfIdle();
+  }
+  dispose() {
+    this.disposeInternal(false);
+  }
+  disposeInternal(fromCancel) {
+    if (this.terminal) {
+      if (this.ownerRemoved)
+        return this.terminalCompletionPromise ?? Promise.resolve();
+      return this.retryTerminalCleanup();
+    }
+    this.terminal = true;
+    this.currentState = "disposed";
+    this.refreshFinalStats();
+    this.lifecycleController.abort();
+    const immediateCleanup = !this.producerMayBeRunning || this.producerStopped ? { status: 0 } : this.producerStopAttempted ? null : this.stopProducer();
+    if (immediateCleanup?.status === 0)
+      this.refreshFinalStats();
+    this.terminalCompletionPromise = (async () => {
+      const cleanup = immediateCleanup?.status === 0 ? immediateCleanup : await this.cleanupProducer();
+      this.refreshFinalStats();
+      if (cleanup.status === 0) {
+        this.removeOwner();
+        if (!fromCancel) {
+          try {
+            this.streamController?.close();
+          } catch {}
+        }
+        if (this.exposed)
+          this.emitTerminal("disposed");
+        else
+          this.closedResolve();
+        return;
+      }
+      this.currentState = "errored";
+      const error = this.operationError("destroy", cleanup);
+      try {
+        this.streamController?.error(error);
+      } catch {}
+      if (this.exposed)
+        this.emitTerminal("error", error, error.context);
+      else
+        this.closedResolve();
+    })();
+    return this.terminalCompletionPromise;
+  }
+  pull() {
+    return this.pump();
+  }
+  pump() {
+    if (this.pumpPromise != null)
+      return this.pumpPromise;
+    const pump = Promise.resolve().then(async () => {
+      do {
+        await this.pumpSource();
+      } while (this.discardRequested && !this.terminal);
+    });
+    this.pumpPromise = pump;
+    const clear = () => {
+      if (this.pumpPromise === pump)
+        this.pumpPromise = null;
+    };
+    pump.then(clear, clear);
+    return pump;
+  }
+  async pumpSource() {
+    if (this.discardRequested) {
+      await this.discardNativeRing();
+      return;
+    }
+    const controller = this.streamController;
+    while (!this.terminal) {
+      if (this.discardRequested) {
+        await this.discardNativeRing();
+        return;
+      }
+      const stats = this.refreshStats();
+      if (stats == null || this.terminal)
+        return;
+      const running = this.observeProducer();
+      if (this.terminal)
+        return;
+      const neededFrames = this.chunkFrames - this.pendingFrames;
+      const readableFrames = running ? stats.bufferedFrames >= neededFrames ? neededFrames : 0 : Math.min(neededFrames, stats.bufferedFrames);
+      let framesRead = 0;
+      if (readableFrames > 0) {
+        let result;
+        try {
+          result = this.init.read(readableFrames);
+        } catch (cause) {
+          this.fail(new AudioCaptureStreamError("Audio capture stream read failed", { action: "read" }, cause));
+          return;
+        }
+        if (result.status !== 0) {
+          this.fail(this.operationError("read", result));
+          return;
+        }
+        framesRead = Math.min(readableFrames, result.framesRead);
+        if (framesRead > 0) {
+          const sampleCount = framesRead * this.channels;
+          this.pendingSamples.set(result.frames.subarray(0, sampleCount), this.pendingFrames * this.channels);
+          this.pendingFrames += framesRead;
+          if (this.pendingFrames === this.chunkFrames) {
+            controller.enqueue(this.pendingSamples.slice());
+            this.pendingFrames = 0;
+            if (!running && stats.bufferedFrames <= framesRead)
+              this.finishStopped();
+            return;
+          }
+        }
+      }
+      if (!running && stats.bufferedFrames <= framesRead) {
+        if (this.pendingFrames > 0) {
+          controller.enqueue(this.pendingSamples.slice(0, this.pendingFrames * this.channels));
+          this.pendingFrames = 0;
+        }
+        this.finishStopped();
+        return;
+      }
+      if (!await waitForPoll(this.lifecycleController.signal))
+        return;
+    }
+  }
+  async discardNativeRing() {
+    this.pendingFrames = 0;
+    let chunksThisTurn = 0;
+    while (!this.terminal) {
+      const stats = this.refreshStats();
+      if (stats == null || this.terminal)
+        return;
+      if (stats.bufferedFrames === 0) {
+        this.finishStopped();
+        return;
+      }
+      const frameCount = Math.min(this.chunkFrames, stats.bufferedFrames);
+      let result;
+      try {
+        result = this.init.read(frameCount);
+      } catch (cause) {
+        this.fail(new AudioCaptureStreamError("Audio capture stream read failed", { action: "read" }, cause));
+        return;
+      }
+      if (result.status !== 0) {
+        this.fail(this.operationError("read", result));
+        return;
+      }
+      chunksThisTurn += 1;
+      if (result.framesRead === 0) {
+        if (!await waitForPoll(this.lifecycleController.signal))
+          return;
+      } else if (chunksThisTurn >= CAPTURE_DISCARD_BATCH_CHUNKS) {
+        chunksThisTurn = 0;
+        await waitForDelay(0, this.lifecycleController.signal).catch(() => {
+          return;
+        });
+      }
+    }
+  }
+  requestDiscardDrain() {
+    if (this.terminal || this.discardRequested)
+      return;
+    this.discardRequested = true;
+    this.pump();
+  }
+  scheduleDiscardIfIdle() {
+    if (this.terminal || this.discardRequested || this.discardDecisionScheduled)
+      return;
+    this.discardDecisionScheduled = true;
+    setTimeout(() => {
+      this.discardDecisionScheduled = false;
+      if (this.terminal)
+        return;
+      if (this.readable.locked)
+        this.scheduleDiscardIfIdle();
+      else
+        this.requestDiscardDrain();
+    }, STREAM_POLL_INTERVAL_MS);
+  }
+  refreshStats() {
+    let result;
+    try {
+      result = this.init.stats();
+    } catch (cause) {
+      this.fail(new AudioCaptureStreamError("Audio capture stream stats failed", { action: "stats" }, cause));
+      return null;
+    }
+    if (result.status !== 0 || result.stats == null) {
+      this.fail(this.operationError("stats", result));
+      return null;
+    }
+    this.nativeStats = result.stats;
+    return result.stats;
+  }
+  observeProducer() {
+    if (this.producerStopAttempted)
+      return false;
+    let running;
+    try {
+      running = this.init.isRunning();
+    } catch (cause) {
+      this.fail(new AudioCaptureStreamError("Audio capture stream stats failed", { action: "stats" }, cause));
+      return false;
+    }
+    if (this.terminal)
+      return false;
+    if (running)
+      return true;
+    this.currentState = "stopping";
+    const result = this.stopProducer();
+    if (result != null && result.status !== 0)
+      this.fail(this.operationError("stop", result));
+    return false;
+  }
+  stopProducer() {
+    if (this.producerStopAttempted)
+      return null;
+    this.producerStopAttempted = true;
+    try {
+      const result = this.init.stop();
+      if (result.status === 0) {
+        this.producerStopped = true;
+        this.producerMayBeRunning = false;
+      }
+      return result;
+    } catch (cause) {
+      return { status: -1, cause };
+    }
+  }
+  finishStopped() {
+    if (this.terminal)
+      return;
+    if (this.refreshStats() == null || this.terminal)
+      return;
+    this.terminal = true;
+    this.currentState = "stopped";
+    this.lifecycleController.abort();
+    this.removeOwner();
+    this.streamController?.close();
+    this.emitTerminal("stopped");
+  }
+  fail(error) {
+    if (this.terminal)
+      return;
+    this.terminal = true;
+    this.currentState = "errored";
+    this.lifecycleController.abort();
+    try {
+      this.streamController?.error(error);
+    } catch {}
+    this.terminalCompletionPromise = (async () => {
+      if ((await this.cleanupProducer()).status === 0)
+        this.removeOwner();
+      this.refreshFinalStats();
+      if (this.exposed)
+        this.emitTerminal("error", error, error.context);
+      else
+        this.closedResolve();
+    })();
+  }
+  operationError(action, result) {
+    const context = { action };
+    if (result.status !== 0)
+      context.status = result.status;
+    return new AudioCaptureStreamError(`Audio capture stream ${action} failed${result.status ? `: ${result.status}` : ""}`, context, result.cause);
+  }
+  cleanupProducer() {
+    if (!this.producerMayBeRunning || this.producerStopped)
+      return Promise.resolve({ status: 0 });
+    if (this.producerCleanupPromise != null)
+      return this.producerCleanupPromise;
+    const cleanup = (async () => {
+      let lastFailure = this.lastCleanupFailure ?? { status: -1 };
+      for (let attempt = 0;attempt < 3; attempt += 1) {
+        this.producerStopAttempted = false;
+        const result = this.stopProducer();
+        if (result?.status === 0) {
+          this.lastCleanupFailure = null;
+          return result;
+        }
+        if (result != null) {
+          lastFailure = result;
+          this.lastCleanupFailure = result;
+        }
+        if (attempt < 2)
+          await new Promise((resolve) => setTimeout(resolve, STREAM_POLL_INTERVAL_MS));
+      }
+      return lastFailure;
+    })();
+    this.producerCleanupPromise = cleanup;
+    cleanup.finally(() => {
+      if (this.producerCleanupPromise === cleanup)
+        this.producerCleanupPromise = null;
+    });
+    return cleanup;
+  }
+  retryTerminalCleanup() {
+    return this.cleanupProducer().then((result) => {
+      if (result.status === 0)
+        this.removeOwner();
+    });
+  }
+  publicStats() {
+    return {
+      ...this.nativeStats,
+      state: this.currentState,
+      bufferedDurationMs: this.nativeStats.sampleRate === 0 ? 0 : this.nativeStats.bufferedFrames * 1000 / this.nativeStats.sampleRate
+    };
+  }
+  refreshFinalStats() {
+    try {
+      const result = this.init.stats();
+      if (result.status === 0 && result.stats != null)
+        this.nativeStats = result.stats;
+    } catch {}
+  }
+  removeOwner() {
+    if (this.ownerRemoved)
+      return;
+    this.ownerRemoved = true;
+    this.init.options.signal?.removeEventListener("abort", this.signalAbortListener);
+    this.init.removeFromOwner();
+  }
+  emitTerminal(event, ...args) {
+    setTimeout(() => {
+      try {
+        EventEmitter.prototype.emit.call(this, event, ...args);
+      } finally {
+        this.closedResolve();
+      }
+    }, 0);
+  }
+}
+var createAudioRecorder;
+var openAudioRecorder;
+function createWavHeader(sampleRate, channels, dataBytes) {
+  const header = new Uint8Array(WAV_HEADER_BYTES);
+  const view = new DataView(header.buffer);
+  header.set([82, 73, 70, 70], 0);
+  view.setUint32(4, dataBytes + 36, true);
+  header.set([87, 65, 86, 69], 8);
+  header.set([102, 109, 116, 32], 12);
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * channels * 2, true);
+  view.setUint16(32, channels * 2, true);
+  view.setUint16(34, 16, true);
+  header.set([100, 97, 116, 97], 36);
+  view.setUint32(40, dataBytes, true);
+  return header;
+}
+
+class AudioRecorder extends EventEmitter {
+  static fileSystem = { open: openFile, rename, unlink };
+  filePath;
+  format = "wav";
+  sampleRate;
+  channels;
+  closed;
+  init;
+  currentState = "initializing";
+  capture = null;
+  reader = null;
+  fileHandle = null;
+  tempPath = null;
+  captureStats;
+  framesWritten = 0n;
+  dataBytesWritten = 0n;
+  stopRequested = false;
+  terminal = null;
+  terminationRequest = null;
+  publicationStarted = false;
+  exposed = false;
+  ownerRemoved = false;
+  cleanupPromise = null;
+  resourceCleanupPromise = null;
+  retainedCleanupScheduled = false;
+  lifecyclePromise = null;
+  closedResolve;
+  signalAbortListener = () => this.dispose();
+  captureErrorListener = (error) => {
+    this.fail(this.fromCaptureError(error));
+  };
+  static {
+    createAudioRecorder = (init) => new AudioRecorder(init);
+    openAudioRecorder = (recorder) => recorder.open();
+  }
+  constructor(init) {
+    super();
+    this.init = init;
+    this.filePath = init.filePath;
+    this.sampleRate = init.captureOptions.sampleRate;
+    this.channels = init.captureOptions.channels;
+    this.captureStats = {
+      state: "initializing",
+      sampleRate: this.sampleRate,
+      channels: this.channels,
+      capacityFrames: init.captureOptions.capacityFrames,
+      bufferedFrames: 0,
+      bufferedDurationMs: 0,
+      framesReceived: 0n,
+      framesRead: 0n,
+      framesDropped: 0n
+    };
+    this.closed = new Promise((resolve) => this.closedResolve = resolve);
+    this.init.signal?.addEventListener("abort", this.signalAbortListener, { once: true });
+  }
+  get state() {
+    return this.currentState;
+  }
+  async open() {
+    try {
+      this.fileHandle = await this.openTemporaryFile();
+      this.ensureOpening();
+      await this.writeFully(new Uint8Array(WAV_HEADER_BYTES), 0, "write");
+      this.ensureOpening();
+      try {
+        this.capture = await this.init.openCapture({
+          channels: this.init.captureOptions.channels,
+          capacityFrames: this.init.captureOptions.capacityFrames,
+          chunkFrames: this.init.captureOptions.chunkFrames,
+          startOptions: this.init.captureOptions.startOptions
+        });
+        this.capture.on("error", this.captureErrorListener);
+      } catch (cause) {
+        if (cause instanceof DOMException && cause.name === "AbortError")
+          throw cause;
+        throw new AudioRecorderError("Audio recorder capture start failed", { action: "start" }, cause);
+      }
+      this.ensureOpening();
+      this.captureStats = this.capture.getStats();
+      if (this.captureStats.framesDropped > 0n) {
+        throw new AudioRecorderError("Audio recorder capture dropped frames", { action: "stats" });
+      }
+      this.currentState = "recording";
+      this.exposed = true;
+      this.reader = this.capture.readable.getReader();
+      const lifecycle = this.consume();
+      this.lifecyclePromise = lifecycle;
+      lifecycle.finally(() => {
+        if (this.lifecyclePromise === lifecycle)
+          this.lifecyclePromise = null;
+        const request = this.terminationRequest;
+        if (request != null)
+          this.finishCleanup(request.kind, request.error);
+      });
+    } catch (cause) {
+      if (this.terminationRequest == null) {
+        if (cause instanceof DOMException && cause.name === "AbortError")
+          this.requestTermination("disposed");
+        else {
+          const error = cause instanceof AudioRecorderError ? cause : new AudioRecorderError("Audio recorder open failed", { action: "open" }, cause);
+          this.requestTermination("error", error);
+        }
+      }
+      const request = this.terminationRequest;
+      const cleanupError = await this.finishCleanup(request.kind, request.error);
+      if (cleanupError != null) {
+        throw new AudioRecorderError("Audio recorder setup cleanup failed", { action: "destroy" }, new AggregateError([cause, cleanupError], "Audio recorder setup and cleanup failed"));
+      }
+      if (request.kind === "disposed")
+        throw createAbortError();
+      if (cause instanceof AudioRecorderError)
+        throw cause;
+      throw new AudioRecorderError("Audio recorder open failed", { action: "open" }, cause);
+    }
+  }
+  getStats() {
+    if (this.capture != null && this.terminal == null && this.terminationRequest == null) {
+      this.captureStats = this.capture.getStats();
+      if (this.captureStats.framesDropped > 0n) {
+        this.fail(new AudioRecorderError("Audio recorder capture dropped frames", { action: "stats" }));
+      }
+    }
+    return {
+      sampleRate: this.captureStats.sampleRate,
+      channels: this.captureStats.channels,
+      capacityFrames: this.captureStats.capacityFrames,
+      bufferedFrames: this.captureStats.bufferedFrames,
+      bufferedDurationMs: this.captureStats.bufferedDurationMs,
+      framesReceived: this.captureStats.framesReceived,
+      framesRead: this.captureStats.framesRead,
+      framesDropped: this.captureStats.framesDropped,
+      state: this.currentState,
+      framesWritten: this.framesWritten,
+      dataBytesWritten: this.dataBytesWritten,
+      durationMs: this.sampleRate === 0 ? 0 : Number(this.framesWritten) * 1000 / this.sampleRate
+    };
+  }
+  stop() {
+    if (this.terminal != null || this.terminationRequest != null || this.stopRequested)
+      return;
+    this.stopRequested = true;
+    this.currentState = "stopping";
+    try {
+      this.capture?.stop();
+    } catch (cause) {
+      this.fail(new AudioRecorderError("Audio recorder capture stop failed", { action: "stop" }, cause));
+    }
+  }
+  dispose() {
+    if (this.terminal != null) {
+      this.retryRetainedCleanup();
+      return;
+    }
+    if (this.publicationStarted)
+      return;
+    this.requestTermination("disposed");
+  }
+  async consume() {
+    const reader = this.reader;
+    let pendingRead = this.readWithStats(reader);
+    try {
+      while (this.terminal == null && this.terminationRequest == null) {
+        const result = await pendingRead;
+        pendingRead = null;
+        if (this.terminal != null || this.terminationRequest != null)
+          return;
+        if (result.done) {
+          if (!this.stopRequested) {
+            this.fail(new AudioRecorderError("Audio capture stopped unexpectedly", { action: "stop" }));
+          } else {
+            await this.complete();
+          }
+          return;
+        }
+        pendingRead = this.readWithStats(reader);
+        this.captureStats = this.capture.getStats();
+        if (this.captureStats.framesDropped > 0n) {
+          this.fail(new AudioRecorderError("Audio recorder capture dropped frames", { action: "stats" }));
+          return;
+        }
+        await this.writeSamples(result.value);
+      }
+    } catch (cause) {
+      if (this.terminal == null && this.terminationRequest == null) {
+        const error = cause instanceof AudioRecorderError ? cause : cause instanceof AudioCaptureStreamError ? this.fromCaptureError(cause) : new AudioRecorderError("Audio recorder read failed", { action: "read" }, cause);
+        this.fail(error);
+      }
+    } finally {
+      if (pendingRead != null)
+        pendingRead.catch(() => {
+          return;
+        });
+      try {
+        reader.releaseLock();
+      } catch {}
+    }
+  }
+  async writeSamples(samples) {
+    if (samples.length % this.channels !== 0) {
+      throw new AudioRecorderError("Audio recorder received a partial frame", { action: "read" });
+    }
+    const bytes = new Uint8Array(samples.length * 2);
+    const view = new DataView(bytes.buffer);
+    for (let index = 0;index < samples.length; index += 1) {
+      const sample = Math.max(-1, Math.min(1, samples[index]));
+      view.setInt16(index * 2, Math.round(sample * 32767), true);
+    }
+    const nextDataBytes = this.dataBytesWritten + BigInt(bytes.byteLength);
+    if (nextDataBytes > MAX_WAV_DATA_BYTES) {
+      throw new AudioRecorderError("Audio recorder exceeded the classic RIFF size limit", { action: "write" });
+    }
+    await this.writeFully(bytes, WAV_HEADER_BYTES + Number(this.dataBytesWritten), "write");
+    this.dataBytesWritten = nextDataBytes;
+    this.framesWritten += BigInt(samples.length / this.channels);
+  }
+  readWithStats(reader) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let timer;
+      const finish = (callback) => {
+        if (settled)
+          return;
+        settled = true;
+        if (timer !== undefined)
+          clearTimeout(timer);
+        callback();
+      };
+      const poll = () => {
+        if (settled)
+          return;
+        if (this.terminal != null || this.terminationRequest != null) {
+          finish(() => resolve({ done: true, value: undefined }));
+          return;
+        }
+        this.captureStats = this.capture.getStats();
+        if (this.captureStats.framesDropped > 0n) {
+          finish(() => reject(new AudioRecorderError("Audio recorder capture dropped frames", { action: "stats" })));
+          return;
+        }
+        timer = setTimeout(poll, STREAM_POLL_INTERVAL_MS);
+      };
+      reader.read().then((result) => finish(() => resolve(result)), (cause) => finish(() => reject(cause)));
+      timer = setTimeout(poll, STREAM_POLL_INTERVAL_MS);
+    });
+  }
+  async complete() {
+    if (this.terminal != null || this.terminationRequest != null)
+      return;
+    this.captureStats = this.capture.getStats();
+    if (this.captureStats.framesDropped > 0n) {
+      this.fail(new AudioRecorderError("Audio recorder capture dropped frames", { action: "stats" }));
+      return;
+    }
+    try {
+      await this.writeFully(createWavHeader(this.sampleRate, this.channels, Number(this.dataBytesWritten)), 0, "finalize");
+      if (this.terminationRequest != null)
+        return;
+      await this.fileHandle.sync();
+      if (this.terminationRequest != null)
+        return;
+      await this.fileHandle.close();
+      this.fileHandle = null;
+    } catch (cause) {
+      if (this.terminationRequest == null) {
+        this.fail(cause instanceof AudioRecorderError ? cause : new AudioRecorderError("Audio recorder finalize failed", { action: "finalize" }, cause));
+      }
+      return;
+    }
+    if (this.terminationRequest != null)
+      return;
+    this.publicationStarted = true;
+    try {
+      await this.publish();
+    } catch (cause) {
+      const error = new AudioRecorderError("Audio recorder publish failed", { action: "publish" }, cause);
+      this.terminal = "error";
+      this.currentState = "errored";
+      await this.finishCleanup("error", error);
+      return;
+    }
+    this.terminal = "stopped";
+    this.currentState = "stopped";
+    this.init.signal?.removeEventListener("abort", this.signalAbortListener);
+    this.capture?.removeListener("error", this.captureErrorListener);
+    if (this.hasRetainedResources())
+      this.scheduleRetainedCleanup();
+    else
+      this.removeOwner();
+    this.emitTerminal("stopped");
+  }
+  async publish() {
+    const tempPath = this.tempPath;
+    await AudioRecorder.fileSystem.rename(tempPath, this.filePath);
+    this.tempPath = null;
+  }
+  fail(error) {
+    if (this.terminal != null || this.publicationStarted)
+      return;
+    this.requestTermination("error", error);
+  }
+  requestTermination(kind, error) {
+    if (this.terminal != null || this.publicationStarted || this.terminationRequest != null)
+      return;
+    this.terminationRequest = { kind, error };
+    this.currentState = kind === "disposed" ? "disposed" : "errored";
+    this.capture?.dispose();
+    if (this.exposed && this.lifecyclePromise == null)
+      this.finishCleanup(kind, error);
+  }
+  finishCleanup(kind, error) {
+    if (this.cleanupPromise != null)
+      return this.cleanupPromise;
+    this.cleanupPromise = (async () => {
+      this.init.signal?.removeEventListener("abort", this.signalAbortListener);
+      const capture2 = this.capture;
+      capture2?.dispose();
+      if (capture2 != null) {
+        await capture2.closed;
+        this.captureStats = capture2.getStats();
+      }
+      capture2?.removeListener("error", this.captureErrorListener);
+      const cleanupError = await this.cleanupOwnedResources();
+      const captureCleanupError = capture2?.state === "errored" ? new AudioRecorderError("Audio recorder capture cleanup failed", { action: "destroy" }) : null;
+      const terminalKind = cleanupError == null && captureCleanupError == null ? kind : "error";
+      const terminalError = cleanupError ?? error ?? captureCleanupError;
+      this.terminal = terminalKind;
+      this.currentState = terminalKind === "disposed" ? "disposed" : "errored";
+      if (this.hasRetainedResources())
+        this.scheduleRetainedCleanup();
+      else
+        this.removeOwner();
+      if (!this.exposed) {
+        this.closedResolve();
+      } else if (terminalKind === "error") {
+        this.emitTerminal("error", terminalError, terminalError.context);
+      } else {
+        this.emitTerminal("disposed");
+      }
+      return cleanupError ?? captureCleanupError;
+    })();
+    return this.cleanupPromise;
+  }
+  cleanupOwnedResources() {
+    if (!this.hasRetainedResources())
+      return Promise.resolve(null);
+    if (this.resourceCleanupPromise != null)
+      return this.resourceCleanupPromise;
+    const cleanup = (async () => {
+      let lastError = null;
+      for (let attempt = 0;attempt < 3; attempt += 1) {
+        const handle = this.fileHandle;
+        if (handle != null) {
+          try {
+            await handle.close();
+            if (this.fileHandle === handle)
+              this.fileHandle = null;
+          } catch (cause) {
+            lastError = new AudioRecorderError("Audio recorder file close failed", { action: "destroy" }, cause);
+          }
+        }
+        if (this.fileHandle == null) {
+          const tempPath = this.tempPath;
+          if (tempPath != null) {
+            try {
+              await AudioRecorder.fileSystem.unlink(tempPath);
+              if (this.tempPath === tempPath)
+                this.tempPath = null;
+            } catch (cause) {
+              lastError = new AudioRecorderError("Audio recorder temp file cleanup failed", { action: "destroy" }, cause);
+            }
+          }
+        }
+        if (!this.hasRetainedResources())
+          return null;
+        if (attempt < 2)
+          await new Promise((resolve) => setTimeout(resolve, STREAM_POLL_INTERVAL_MS));
+      }
+      return lastError ?? new AudioRecorderError("Audio recorder resource cleanup failed", { action: "destroy" });
+    })();
+    this.resourceCleanupPromise = cleanup;
+    const clear = () => {
+      if (this.resourceCleanupPromise === cleanup)
+        this.resourceCleanupPromise = null;
+    };
+    cleanup.then(clear, clear);
+    return cleanup;
+  }
+  retryRetainedCleanup() {
+    this.capture?.dispose();
+    if (!this.hasRetainedResources()) {
+      this.removeOwner();
+      return Promise.resolve();
+    }
+    return this.cleanupOwnedResources().then(() => {
+      if (!this.hasRetainedResources())
+        this.removeOwner();
+    });
+  }
+  scheduleRetainedCleanup() {
+    if (this.retainedCleanupScheduled || !this.hasRetainedResources())
+      return;
+    this.retainedCleanupScheduled = true;
+    setTimeout(() => {
+      this.retainedCleanupScheduled = false;
+      this.retryRetainedCleanup();
+    }, STREAM_POLL_INTERVAL_MS);
+  }
+  hasRetainedResources() {
+    return this.fileHandle != null || this.tempPath != null;
+  }
+  async openTemporaryFile() {
+    const directory = dirname(this.filePath);
+    const destinationName = basename(this.filePath);
+    const tempNameLength = Math.max(1, Math.min(24, destinationName.length));
+    const singleCharacterNames = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-";
+    for (let attempt = 0;attempt < singleCharacterNames.length; attempt += 1) {
+      const tempName = tempNameLength === 1 ? singleCharacterNames[attempt] : randomBytes(16).toString("hex").slice(0, tempNameLength);
+      if (tempName === destinationName)
+        continue;
+      const tempPath = join(directory, tempName);
+      try {
+        const handle = await AudioRecorder.fileSystem.open(tempPath, "wx");
+        this.tempPath = tempPath;
+        return handle;
+      } catch (cause) {
+        if (cause.code !== "EEXIST") {
+          throw new AudioRecorderError("Audio recorder temp file open failed", { action: "open" }, cause);
+        }
+      }
+    }
+    throw new AudioRecorderError("Audio recorder could not allocate a temporary file", { action: "open" });
+  }
+  async writeFully(bytes, position, action) {
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      let bytesWritten;
+      try {
+        ({ bytesWritten } = await this.fileHandle.write(bytes, offset, bytes.byteLength - offset, position + offset));
+      } catch (cause) {
+        throw new AudioRecorderError(`Audio recorder ${action} write failed`, { action }, cause);
+      }
+      if (bytesWritten <= 0) {
+        throw new AudioRecorderError(`Audio recorder ${action} write made no progress`, { action });
+      }
+      offset += Math.min(bytesWritten, bytes.byteLength - offset);
+    }
+  }
+  ensureOpening() {
+    if (this.terminationRequest?.kind === "disposed" || this.init.signal?.aborted)
+      throw createAbortError();
+    if (this.terminationRequest?.kind === "error")
+      throw this.terminationRequest.error;
+  }
+  fromCaptureError(error) {
+    const action = error.context.action === "stop" ? "stop" : error.context.action === "stats" ? "stats" : error.context.action === "destroy" ? "destroy" : "read";
+    const context = { action };
+    if (error.context.status !== undefined)
+      context.status = error.context.status;
+    return new AudioRecorderError(`Audio recorder capture ${action} failed`, context, error);
+  }
+  removeOwner() {
+    if (this.ownerRemoved)
+      return;
+    this.ownerRemoved = true;
+    this.init.removeFromOwner();
+  }
+  emitTerminal(event, ...args) {
+    setTimeout(() => {
+      try {
+        EventEmitter.prototype.emit.call(this, event, ...args);
+      } finally {
+        this.closedResolve();
+      }
+    }, 0);
+  }
+}
 
 class Audio extends EventEmitter {
   static create(options = {}) {
@@ -3793,6 +4816,13 @@ class Audio extends EventEmitter {
   streams = new Set;
   playbackStarted = false;
   mixerStarted = false;
+  captureStarted = false;
+  captureDeviceOpen = false;
+  captureBufferAvailable = false;
+  captureChannels = 1;
+  captureCapacityFrames = 0;
+  captureOwner = null;
+  captureStream = null;
   disposing = false;
   constructor(lib, options) {
     super();
@@ -4184,6 +5214,323 @@ class Audio extends EventEmitter {
     }
     this.lib.audioClearPlaybackDeviceSelection(engine2);
   }
+  async openCapture(options = {}) {
+    const resolved = resolveAudioCaptureStreamOptions(options, this.sampleRate);
+    if (resolved.signal?.aborted)
+      throw createAbortError();
+    if (!this.engine) {
+      throw new AudioCaptureStreamError("Audio engine unavailable during capture stream start", { action: "start" });
+    }
+    if (this.captureOwner != null || this.isCapturing()) {
+      throw new AudioCaptureStreamError("Audio capture ring is already in use", { action: "start" });
+    }
+    const owner = {};
+    this.captureOwner = owner;
+    let stream = null;
+    try {
+      stream = createAudioCaptureStream({
+        options: resolved,
+        start: () => this.startCaptureInternal(resolved, owner),
+        read: (frameCount) => this.readCaptureInternal(frameCount, owner),
+        stats: () => this.getCaptureStatsInternal(owner),
+        stop: () => this.stopCaptureInternal(owner),
+        isRunning: () => this.isCapturingInternal(owner),
+        removeFromOwner: () => {
+          if (this.captureOwner === owner)
+            this.captureOwner = null;
+          if (this.captureStream === stream)
+            this.captureStream = null;
+          if (stream != null)
+            this.streams.delete(stream);
+        }
+      });
+      this.captureStream = stream;
+      this.streams.add(stream);
+      await openAudioCaptureStream(stream);
+      return stream;
+    } catch (error) {
+      if (stream == null) {
+        if (this.captureOwner === owner)
+          this.captureOwner = null;
+      } else {
+        stream.dispose();
+        if (this.captureOwner !== owner)
+          this.streams.delete(stream);
+      }
+      throw error;
+    }
+  }
+  async recordToFile(filePath, options = {}) {
+    if (typeof filePath !== "string" || filePath.length === 0)
+      throw new TypeError("filePath must be a nonempty string");
+    if (filePath.includes("\x00"))
+      throw new TypeError("filePath must not contain NUL bytes");
+    const resolved = resolveAudioCaptureStreamOptions(options, this.sampleRate);
+    if (resolved.channels !== 1 && resolved.channels !== 2) {
+      throw new RangeError("WAV recording supports only 1 or 2 channels");
+    }
+    if (this.sampleRate * resolved.channels * 2 > MAX_U32) {
+      throw new RangeError("WAV byte rate exceeds the supported limit");
+    }
+    if (resolved.signal?.aborted)
+      throw createAbortError();
+    if (!this.engine)
+      throw new AudioRecorderError("Audio engine unavailable during recorder open", { action: "open" });
+    let recorder;
+    recorder = createAudioRecorder({
+      filePath,
+      signal: resolved.signal,
+      captureOptions: resolved,
+      openCapture: (captureOptions) => this.openCapture(captureOptions),
+      removeFromOwner: () => this.streams.delete(recorder)
+    });
+    this.streams.add(recorder);
+    try {
+      await openAudioRecorder(recorder);
+      return recorder;
+    } catch (error) {
+      throw error;
+    }
+  }
+  listCaptureDevices() {
+    const engine2 = this.engine;
+    if (!engine2) {
+      this.emitError("listCaptureDevices", undefined, "Audio engine unavailable during listCaptureDevices");
+      return null;
+    }
+    const refreshStatus = this.lib.audioRefreshCaptureDevices(engine2);
+    if (refreshStatus !== 0) {
+      this.emitError("listCaptureDevices", refreshStatus);
+      return null;
+    }
+    const count = this.lib.audioGetCaptureDeviceCount(engine2);
+    const devices = [];
+    for (let index = 0;index < count; index += 1) {
+      devices.push({
+        index,
+        name: this.lib.audioGetCaptureDeviceName(engine2, index),
+        isDefault: this.lib.audioIsCaptureDeviceDefault(engine2, index)
+      });
+    }
+    return devices;
+  }
+  selectCaptureDevice(index) {
+    const resolvedIndex = resolveU32Index(index, "index");
+    if (this.captureOwner != null) {
+      this.emitCaptureOwnershipError("selectCaptureDevice");
+      return false;
+    }
+    const engine2 = this.engine;
+    if (!engine2) {
+      this.emitError("selectCaptureDevice", undefined, "Audio engine unavailable during selectCaptureDevice");
+      return false;
+    }
+    const status = this.lib.audioSelectCaptureDevice(engine2, resolvedIndex);
+    if (status !== 0) {
+      this.emitError("selectCaptureDevice", status);
+      return false;
+    }
+    return true;
+  }
+  clearCaptureDeviceSelection() {
+    if (this.captureOwner != null) {
+      this.emitCaptureOwnershipError("clearCaptureDeviceSelection");
+      return;
+    }
+    const engine2 = this.engine;
+    if (!engine2) {
+      this.emitError("clearCaptureDeviceSelection", undefined, "Audio engine unavailable during clearCaptureDeviceSelection");
+      return;
+    }
+    this.lib.audioClearCaptureDeviceSelection(engine2);
+  }
+  startCapture(options = {}) {
+    if (this.disposing)
+      return false;
+    const channels = resolvePositiveU32(options.channels, 1, "channels");
+    const capacityFrames = resolvePositiveU32(options.capacityFrames, this.sampleRate, "capacityFrames");
+    if (this.captureOwner != null) {
+      this.emitCaptureOwnershipError("startCapture");
+      return false;
+    }
+    if (this.isCapturing()) {
+      const configurationMatches = (options.channels === undefined || channels === this.captureChannels) && (options.capacityFrames === undefined || capacityFrames === this.captureCapacityFrames) && options.startOptions === undefined;
+      if (configurationMatches)
+        return true;
+      this.emitError("startCapture", undefined, "Audio capture is already running with a different configuration");
+      return false;
+    }
+    const engine2 = this.engine;
+    if (!engine2) {
+      this.emitError("startCapture", undefined, "Audio engine unavailable during startCapture");
+      return false;
+    }
+    const result = this.startCaptureInternal({ sampleRate: this.sampleRate, channels, capacityFrames, chunkFrames: 1, startOptions: options.startOptions }, null);
+    if (result.status !== 0) {
+      this.emitError("startCapture", result.status, undefined, result.cause);
+      return false;
+    }
+    return true;
+  }
+  isCapturing() {
+    return this.isCapturingInternal(null);
+  }
+  isCapturingInternal(_owner) {
+    if (!this.captureStarted)
+      return false;
+    const engine2 = this.engine;
+    if (engine2 && this.lib.audioIsCaptureRunning(engine2))
+      return true;
+    this.captureStarted = false;
+    this.emit("captureStopped");
+    return this.captureStarted;
+  }
+  readCaptureFrames(frameCount) {
+    const resolvedFrameCount = resolvePositiveU32(frameCount, frameCount, "frameCount");
+    if (this.captureOwner != null) {
+      this.emitCaptureOwnershipError("readCaptureFrames");
+      return null;
+    }
+    if (!this.captureBufferAvailable) {
+      this.emitError("readCaptureFrames", -4);
+      return null;
+    }
+    if (resolvedFrameCount > this.captureCapacityFrames) {
+      throw new RangeError("frameCount exceeds the capture buffer capacity");
+    }
+    if (resolvedFrameCount > Math.floor(MAX_U32 / this.captureChannels)) {
+      throw new RangeError("frameCount * channels exceeds the supported limit");
+    }
+    const engine2 = this.engine;
+    if (!engine2) {
+      this.emitError("readCaptureFrames", undefined, "Audio engine unavailable during readCaptureFrames");
+      return null;
+    }
+    const result = this.readCaptureInternal(resolvedFrameCount, null);
+    if (result.status !== 0) {
+      this.emitError("readCaptureFrames", result.status, undefined, result.cause);
+      return null;
+    }
+    return { frames: result.frames, framesRead: result.framesRead };
+  }
+  getCaptureStats() {
+    const engine2 = this.engine;
+    if (!engine2) {
+      this.emitError("getCaptureStats", undefined, "Audio engine unavailable during getCaptureStats");
+      return null;
+    }
+    const result = this.getCaptureStatsInternal(null);
+    if (result.status !== 0 || result.stats == null) {
+      this.emitError("getCaptureStats", result.status, undefined, result.cause);
+      return null;
+    }
+    return result.stats;
+  }
+  stopCapture() {
+    if (this.captureOwner != null) {
+      this.emitCaptureOwnershipError("stopCapture");
+      return false;
+    }
+    if (!this.captureDeviceOpen)
+      return true;
+    const engine2 = this.engine;
+    if (!engine2) {
+      this.emitError("stopCapture", undefined, "Audio engine unavailable during stopCapture");
+      return false;
+    }
+    const result = this.stopCaptureInternal(null);
+    if (result.status !== 0) {
+      this.emitError("stopCapture", result.status, undefined, result.cause);
+      return false;
+    }
+    return true;
+  }
+  emitCaptureOwnershipError(action) {
+    this.emitError(action, undefined, `Audio ${action} failed: capture is owned by a stream`);
+  }
+  startCaptureInternal(options, owner) {
+    if (this.captureOwner != null && this.captureOwner !== owner)
+      return { status: -1 };
+    const engine2 = this.engine;
+    if (!engine2)
+      return { status: -1 };
+    let status;
+    try {
+      status = this.lib.audioStartCapture(engine2, options.startOptions, options.channels, options.capacityFrames);
+    } catch (cause) {
+      return { status: -1, cause };
+    }
+    if (status !== 0)
+      return { status };
+    this.captureChannels = options.channels;
+    this.captureCapacityFrames = options.capacityFrames;
+    this.captureBufferAvailable = true;
+    this.captureDeviceOpen = true;
+    this.captureStarted = true;
+    this.emit("captureStarted");
+    return { status: 0 };
+  }
+  readCaptureInternal(frameCount, owner) {
+    const output = new Float32Array(frameCount * this.captureChannels);
+    if (this.captureOwner != null && this.captureOwner !== owner)
+      return { status: -1, frames: output, framesRead: 0 };
+    const engine2 = this.engine;
+    if (!engine2 || !this.captureBufferAvailable)
+      return { status: -4, frames: output, framesRead: 0 };
+    try {
+      const result = this.lib.audioReadCapture(engine2, output, frameCount);
+      return { status: result.status, frames: output, framesRead: Math.min(frameCount, result.framesRead) };
+    } catch (cause) {
+      return { status: -1, frames: output, framesRead: 0, cause };
+    }
+  }
+  getCaptureStatsInternal(_owner) {
+    const engine2 = this.engine;
+    if (!engine2)
+      return { status: -1, stats: null };
+    try {
+      const result = this.lib.audioGetCaptureStats(engine2);
+      if (result.status !== 0 || result.stats == null)
+        return { status: result.status, stats: null };
+      return {
+        status: 0,
+        stats: {
+          sampleRate: result.stats.sampleRate,
+          channels: result.stats.channels,
+          capacityFrames: result.stats.capacityFrames,
+          bufferedFrames: result.stats.bufferedFrames,
+          framesReceived: result.stats.framesReceived,
+          framesRead: result.stats.framesRead,
+          framesDropped: result.stats.framesDropped
+        }
+      };
+    } catch (cause) {
+      return { status: -1, stats: null, cause };
+    }
+  }
+  stopCaptureInternal(owner) {
+    if (this.captureOwner != null && this.captureOwner !== owner)
+      return { status: -1 };
+    if (!this.captureDeviceOpen)
+      return { status: 0 };
+    const engine2 = this.engine;
+    if (!engine2)
+      return { status: -1 };
+    let status;
+    try {
+      status = this.lib.audioStopCapture(engine2);
+    } catch (cause) {
+      return { status: -1, cause };
+    }
+    if (status !== 0)
+      return { status };
+    const wasStarted = this.captureStarted;
+    this.captureDeviceOpen = false;
+    this.captureStarted = false;
+    if (wasStarted)
+      this.emit("captureStopped");
+    return { status: 0 };
+  }
   getStats() {
     const engine2 = this.engine;
     if (!engine2) {
@@ -4200,23 +5547,546 @@ class Audio extends EventEmitter {
     if (!this.engine || this.disposing)
       return;
     this.disposing = true;
+    let firstError;
+    let hasError = false;
+    let childCleanupFailed = false;
+    const runCleanup = (operation) => {
+      try {
+        operation();
+      } catch (error) {
+        if (!hasError) {
+          firstError = error;
+          hasError = true;
+        }
+      }
+    };
     try {
-      for (const stream of [...this.streams])
-        stream.dispose();
+      for (const stream of [...this.streams]) {
+        try {
+          stream.dispose();
+        } catch (error) {
+          childCleanupFailed = true;
+          if (!hasError) {
+            firstError = error;
+            hasError = true;
+          }
+        }
+      }
+      if (this.captureDeviceOpen) {
+        let result;
+        runCleanup(() => {
+          result = this.stopCaptureInternal(this.captureOwner);
+        });
+        if (result && result.status !== 0) {
+          const wasStarted = this.captureStarted;
+          this.captureDeviceOpen = false;
+          this.captureStarted = false;
+          runCleanup(() => this.emitError("stopCapture", result.status, undefined, result.cause));
+          if (wasStarted)
+            runCleanup(() => void this.emit("captureStopped"));
+        }
+      }
+      if (this.captureStream != null) {
+        runCleanup(() => refreshAudioCaptureStreamFinalStats(this.captureStream));
+      }
       if (this.mixerStarted) {
-        this.stop();
+        runCleanup(() => void this.stop());
       }
       this.groups.clear();
-      this.lib.destroyAudioEngine(this.engine);
-      this.engine = null;
-      this.emit("disposed");
+      const engine2 = this.engine;
+      let engineDestroyed = false;
+      if (!childCleanupFailed) {
+        runCleanup(() => {
+          this.lib.destroyAudioEngine(engine2);
+          engineDestroyed = true;
+        });
+      }
+      if (engineDestroyed) {
+        this.engine = null;
+        this.captureStarted = false;
+        this.captureDeviceOpen = false;
+        this.captureBufferAvailable = false;
+        this.captureCapacityFrames = 0;
+        this.captureOwner = null;
+        this.captureStream = null;
+        runCleanup(() => void this.emit("disposed"));
+      }
     } finally {
       this.disposing = false;
     }
+    if (hasError)
+      throw firstError;
   }
 }
 function setupAudio(options = {}) {
   return Audio.create(options);
+}
+// src/image.ts
+import { open, stat } from "fs/promises";
+class ImageLoadError extends Error {
+  code;
+  source;
+  status;
+  constructor(code, source, message, options) {
+    super(message, { cause: options?.cause });
+    this.name = "ImageLoadError";
+    this.code = code;
+    this.source = source;
+    this.status = options?.status;
+  }
+}
+
+class OwnedRawImageImpl {
+  data;
+  width;
+  height;
+  stride;
+  lib;
+  handle;
+  format = "rgba8";
+  colorSpace = "srgb";
+  alpha = "straight";
+  constructor(data, width, height, stride, lib, handle) {
+    this.data = data;
+    this.width = width;
+    this.height = height;
+    this.stride = stride;
+    this.lib = lib;
+    this.handle = handle;
+  }
+  dispose() {
+    if (!this.handle)
+      return;
+    this.lib.imageDestroy(this.handle);
+    this.handle = null;
+  }
+}
+var STATUS_MESSAGES = [
+  "ok",
+  "invalid image handle",
+  "unsupported image format",
+  "unsupported image color space",
+  "malformed image data",
+  "image dimensions exceed limits",
+  "image memory limit exceeded",
+  "invalid image argument",
+  "out of memory",
+  "image output buffer is too small",
+  "internal image error",
+  "unsupported image feature"
+];
+var STATUS_CODES = [
+  "internal-error",
+  "invalid-handle",
+  "unsupported-format",
+  "unsupported-color-space",
+  "malformed-data",
+  "dimension-limit",
+  "memory-limit",
+  "invalid-argument",
+  "out-of-memory",
+  "output-too-small",
+  "internal-error",
+  "unsupported-feature"
+];
+var INVALID_ARGUMENT_STATUS = 7;
+
+class ImageError extends Error {
+  code;
+  status;
+  constructor(status) {
+    super(`Native image operation failed: ${STATUS_MESSAGES[status] ?? `unknown status ${status}`}`);
+    this.name = "ImageError";
+    this.status = status;
+    this.code = STATUS_CODES[status] ?? "internal-error";
+  }
+}
+var FILTER_IDS = {
+  default: 0,
+  area: 1,
+  triangle: 2,
+  "cubic-bspline": 3,
+  "catmull-rom": 4,
+  mitchell: 5,
+  nearest: 6
+};
+var BLEND_IDS = {
+  "source-over": 0,
+  source: 1,
+  "destination-over": 2
+};
+var PIXEL_FORMAT_BGRA = {
+  rgba8: false,
+  bgra8: true
+};
+var MAX_ENCODED_BYTES = 64 * 1024 * 1024;
+function imageError(status) {
+  return new ImageError(status);
+}
+function checkStatus(status) {
+  if (status !== 0)
+    throw imageError(status);
+}
+function requireMappedOption(mapping, value, name) {
+  if (!Object.prototype.hasOwnProperty.call(mapping, value))
+    throw new TypeError(`Unsupported ${name}: ${String(value)}`);
+  return mapping[value];
+}
+function requireU32(value, name, allowZero = false) {
+  if (!Number.isSafeInteger(value) || value < (allowZero ? 0 : 1) || value > 4294967295) {
+    throw new RangeError(`${name} must be ${allowZero ? "a non-negative" : "a positive"} u32 integer`);
+  }
+  return value;
+}
+function requireI32(value, name) {
+  if (!Number.isSafeInteger(value) || value < -2147483648 || value > 2147483647) {
+    throw new RangeError(`${name} must be an i32 integer`);
+  }
+  return value;
+}
+function requireByte(value, name) {
+  if (!Number.isInteger(value) || value < 0 || value > 255)
+    throw new RangeError(`${name} must be an integer from 0 to 255`);
+  return value;
+}
+function unpackInfo(info) {
+  const format = ["unknown", "png", "raw-rgba", "jpeg", "webp", "gif"][info.format];
+  if (!format || format === "unknown")
+    throw new Error(`Unknown native image format ${info.format}`);
+  return {
+    width: info.width,
+    height: info.height,
+    sourceWidth: info.sourceWidth,
+    sourceHeight: info.sourceHeight,
+    format,
+    colorStatus: info.colorStatus === 1 ? "explicit-srgb" : "assumed-srgb",
+    orientation: info.orientation,
+    hasAlpha: info.hasAlpha !== 0
+  };
+}
+function encodedBytes(data) {
+  if (data instanceof Uint8Array)
+    return data;
+  if (data instanceof ArrayBuffer)
+    return new Uint8Array(data);
+  throw new TypeError("image data must be a Uint8Array or ArrayBuffer");
+}
+async function readResponseBytes(response, signal) {
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null) {
+    const declaredLength = Number(contentLength);
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_ENCODED_BYTES) {
+      response.body?.cancel().catch(() => {});
+      throw imageError(6);
+    }
+  }
+  if (!response.body)
+    return new Uint8Array;
+  const reader = response.body.getReader();
+  const abort = () => void reader.cancel(signal?.reason).catch(() => {});
+  signal?.addEventListener("abort", abort, { once: true });
+  let data = new Uint8Array;
+  let total = 0;
+  try {
+    while (true) {
+      signal?.throwIfAborted();
+      const { done, value } = await reader.read();
+      if (done)
+        break;
+      if (value.byteLength > MAX_ENCODED_BYTES - total) {
+        throw imageError(6);
+      }
+      if (value.byteLength === 0)
+        continue;
+      const required = total + value.byteLength;
+      if (required > data.byteLength) {
+        const capacity = Math.min(MAX_ENCODED_BYTES, Math.max(required, data.byteLength * 2));
+        const grown = new Uint8Array(capacity);
+        grown.set(data.subarray(0, total));
+        data = grown;
+      }
+      data.set(value, total);
+      total = required;
+    }
+  } catch (error) {
+    reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    signal?.removeEventListener("abort", abort);
+    reader.releaseLock();
+  }
+  return data.byteLength === total ? data : data.slice(0, total);
+}
+async function readFileBytes(path, signal) {
+  signal?.throwIfAborted();
+  if ((await stat(path)).size > MAX_ENCODED_BYTES)
+    throw imageError(6);
+  const file = await open(path, "r");
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      signal?.throwIfAborted();
+      const chunk = new Uint8Array(Math.min(64 * 1024, MAX_ENCODED_BYTES - total + 1));
+      const { bytesRead } = await file.read(chunk, 0, chunk.byteLength, null);
+      if (bytesRead === 0)
+        break;
+      total += bytesRead;
+      if (total > MAX_ENCODED_BYTES)
+        throw imageError(6);
+      chunks.push(chunk.subarray(0, bytesRead));
+    }
+  } finally {
+    await file.close();
+  }
+  const data = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    data.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return data;
+}
+async function loadResponseBytes(response, source, signal) {
+  try {
+    signal?.throwIfAborted();
+  } catch (error) {
+    response.body?.cancel().catch(() => {});
+    throw error;
+  }
+  if (!response.ok) {
+    response.body?.cancel().catch(() => {});
+    throw new ImageLoadError("http-status", source, `Failed to fetch image: HTTP ${response.status}`, {
+      status: response.status
+    });
+  }
+  try {
+    const data = await readResponseBytes(response, signal);
+    signal?.throwIfAborted();
+    return data;
+  } catch (error) {
+    if (signal?.aborted)
+      throw signal.reason;
+    if (error instanceof ImageError)
+      throw error;
+    throw new ImageLoadError("network", source, `Failed to read image response: ${source}`, { cause: error });
+  }
+}
+function imageInfo(data) {
+  const bytes = encodedBytes(data);
+  if (bytes.byteLength === 0)
+    throw new TypeError("image data must not be empty");
+  const result = resolveRenderLib().imageInfo(bytes);
+  checkStatus(result.status);
+  return unpackInfo(result.info);
+}
+
+class NativeImage {
+  lib;
+  handle;
+  imageInfo;
+  constructor(lib, handle, info) {
+    this.lib = lib;
+    this.handle = handle;
+    this.imageInfo = info;
+  }
+  static decode(data) {
+    const bytes = encodedBytes(data);
+    if (bytes.byteLength === 0)
+      throw new TypeError("image data must not be empty");
+    const lib = resolveRenderLib();
+    const result = lib.imageDecode(bytes);
+    checkStatus(result.status);
+    if (!result.handle)
+      throw imageError(10);
+    return NativeImage.fromHandle(lib, result.handle);
+  }
+  static async load(source, options = {}) {
+    if (source instanceof Response) {
+      return NativeImage.decode(await loadResponseBytes(source, source.url || "Response", options.signal));
+    }
+    options.signal?.throwIfAborted();
+    if (source instanceof Uint8Array || source instanceof ArrayBuffer)
+      return NativeImage.decode(source);
+    if (source instanceof Blob) {
+      if (source.size > MAX_ENCODED_BYTES)
+        throw imageError(6);
+      return NativeImage.decode(await loadResponseBytes(new Response(source), "Blob", options.signal));
+    }
+    const url = source instanceof URL ? source : (/^(?:https?|file|blob|data):/i.test(source) || /^[a-z][a-z0-9+.-]*:\/\//i.test(source)) && !/^[a-z]:[\\/]/i.test(source) ? new URL(source) : null;
+    if (!url || url.protocol === "file:") {
+      const path = url ?? source;
+      let data;
+      try {
+        data = await readFileBytes(path, options.signal);
+      } catch (error) {
+        if (options.signal?.aborted)
+          throw options.signal.reason;
+        if (error instanceof ImageError)
+          throw error;
+        throw new ImageLoadError("file-read", String(source), `Failed to read image: ${String(source)}`, {
+          cause: error
+        });
+      }
+      options.signal?.throwIfAborted();
+      return NativeImage.decode(data);
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:" && url.protocol !== "blob:" && url.protocol !== "data:") {
+      throw new ImageLoadError("unsupported-url-scheme", url.href, `Unsupported image URL scheme: ${url.protocol}`);
+    }
+    let response;
+    try {
+      response = await (options.fetch ?? globalThis.fetch)(url, { signal: options.signal });
+    } catch (error) {
+      if (options.signal?.aborted)
+        throw options.signal.reason;
+      throw new ImageLoadError("network", url.href, `Failed to fetch image: ${url.href}`, { cause: error });
+    }
+    return NativeImage.decode(await loadResponseBytes(response, url.href, options.signal));
+  }
+  static fromRgba(pixels, width, height, stride = width * 4) {
+    if (!(pixels instanceof Uint8Array))
+      throw new TypeError("pixels must be a Uint8Array");
+    requireU32(width, "width");
+    requireU32(height, "height");
+    requireU32(stride, "stride");
+    const lib = resolveRenderLib();
+    const result = lib.imageCreateFromRgba(pixels, width, height, stride);
+    checkStatus(result.status);
+    if (!result.handle)
+      throw imageError(10);
+    return NativeImage.fromHandle(lib, result.handle);
+  }
+  static fromHandle(lib, handle) {
+    const result = lib.imageGetInfo(handle);
+    if (result.status !== 0) {
+      lib.imageDestroy(handle);
+      throw imageError(result.status);
+    }
+    return new NativeImage(lib, handle, unpackInfo(result.info));
+  }
+  guard() {
+    if (!this.handle)
+      throw new Error("NativeImage is disposed");
+    return this.handle;
+  }
+  get ptr() {
+    return this.guard();
+  }
+  wrap(result) {
+    checkStatus(result.status);
+    if (!result.handle)
+      throw imageError(10);
+    return NativeImage.fromHandle(this.lib, result.handle);
+  }
+  info() {
+    this.guard();
+    return { ...this.imageInfo };
+  }
+  get width() {
+    this.guard();
+    return this.imageInfo.width;
+  }
+  get height() {
+    this.guard();
+    return this.imageInfo.height;
+  }
+  clone() {
+    return this.wrap(this.lib.imageClone(this.guard()));
+  }
+  retain() {
+    return this.wrap(this.lib.imageRetain(this.guard()));
+  }
+  resize(options) {
+    if (!options || options.width === undefined && options.height === undefined) {
+      throw new TypeError("resize requires width, height, or both");
+    }
+    let width = options.width;
+    let height = options.height;
+    if (width !== undefined)
+      requireU32(width, "width");
+    if (height !== undefined)
+      requireU32(height, "height");
+    if (width === undefined)
+      width = Math.max(1, Math.round(this.width * height / this.height));
+    if (height === undefined)
+      height = Math.max(1, Math.round(this.height * width / this.width));
+    requireU32(width, "width");
+    requireU32(height, "height");
+    const filter = requireMappedOption(FILTER_IDS, options.kernel ?? "area", "resize kernel");
+    return this.wrap(this.lib.imageResize(this.guard(), width, height, filter));
+  }
+  extract(options) {
+    return this.wrap(this.lib.imageExtract(this.guard(), requireU32(options.left, "left", true), requireU32(options.top, "top", true), requireU32(options.width, "width"), requireU32(options.height, "height")));
+  }
+  extend(options = {}) {
+    const background = options.background ?? [0, 0, 0, 0];
+    if (background.length !== 4)
+      throw new TypeError("background must contain four RGBA channels");
+    const color = Uint8Array.from(background.map((value, index) => requireByte(value, `background[${index}]`)));
+    return this.wrap(this.lib.imageExtend(this.guard(), requireU32(options.top ?? 0, "top", true), requireU32(options.right ?? 0, "right", true), requireU32(options.bottom ?? 0, "bottom", true), requireU32(options.left ?? 0, "left", true), color));
+  }
+  rotate(angle) {
+    const operation = angle === 90 ? 0 : angle === 180 ? 1 : angle === 270 ? 2 : -1;
+    if (operation < 0)
+      throw new RangeError("angle must be 90, 180, or 270");
+    return this.wrap(this.lib.imageTransform(this.guard(), operation));
+  }
+  flip() {
+    return this.wrap(this.lib.imageTransform(this.guard(), 3));
+  }
+  flop() {
+    return this.wrap(this.lib.imageTransform(this.guard(), 4));
+  }
+  composite(overlay, options = {}) {
+    if (!(overlay instanceof NativeImage))
+      throw new TypeError("overlay must be a NativeImage");
+    const opacity = options.opacity ?? 1;
+    if (!Number.isFinite(opacity) || opacity < 0 || opacity > 1)
+      throw new RangeError("opacity must be between 0 and 1");
+    return this.wrap(this.lib.imageComposite(this.guard(), overlay.guard(), requireI32(options.left ?? 0, "left"), requireI32(options.top ?? 0, "top"), requireMappedOption(BLEND_IDS, options.blend ?? "source-over", "blend mode"), Math.round(opacity * 255)));
+  }
+  ensureEncodedPng() {
+    checkStatus(this.lib.imageEnsureEncodedPng(this.guard()));
+  }
+  raw(format = "rgba8") {
+    const stride = this.width * 4;
+    const data = new Uint8Array(stride * this.height);
+    checkStatus(this.lib.imageCopyPixels(this.guard(), data, stride, requireMappedOption(PIXEL_FORMAT_BGRA, format, "pixel format")));
+    return { data, width: this.width, height: this.height, stride, format, colorSpace: "srgb", alpha: "straight" };
+  }
+  takeRaw() {
+    const handle = this.guard();
+    const materializeStatus = this.lib.imageMaterialize(handle);
+    if (materializeStatus === INVALID_ARGUMENT_STATUS) {
+      throw new Error("Cannot transfer image pixels while native buffers retain the image");
+    }
+    checkStatus(materializeStatus);
+    const pointer = this.lib.imageGetPixelsPtr(handle);
+    if (!pointer)
+      throw new Error("Cannot transfer image pixels while native buffers retain the image");
+    const width = this.imageInfo.width;
+    const height = this.imageInfo.height;
+    const stride = width * 4;
+    const data = new Uint8Array(toArrayBuffer(pointer, 0, stride * height));
+    const raw = new OwnedRawImageImpl(data, width, height, stride, this.lib, handle);
+    this.handle = null;
+    return raw;
+  }
+  copyTo(destination, options = {}) {
+    if (!(destination instanceof Uint8Array))
+      throw new TypeError("destination must be a Uint8Array");
+    const stride = options.stride ?? this.width * 4;
+    requireU32(stride, "stride");
+    const bgra = requireMappedOption(PIXEL_FORMAT_BGRA, options.format ?? "rgba8", "pixel format");
+    checkStatus(this.lib.imageCopyPixels(this.guard(), destination, stride, bgra));
+  }
+  dispose() {
+    if (!this.handle)
+      return;
+    this.lib.imageDestroy(this.handle);
+    this.handle = null;
+  }
 }
 // src/renderables/FrameBuffer.ts
 class FrameBufferRenderable extends Renderable {
@@ -6844,6 +8714,208 @@ class InputRenderable extends TextareaRenderable {
     return typeof p === "string" ? p : "";
   }
   set initialValue(value) {}
+}
+// src/renderables/Image.ts
+var TRANSPARENT = RGBA.fromValues(0, 0, 0, 0);
+function resolveImageRenderProtocol(requested, capabilities, hasResolution) {
+  if (requested !== "auto")
+    return requested === "sixel" && !hasResolution ? "blocks" : requested;
+  const configured = capabilities?.image_protocol ?? "auto";
+  if (configured !== "auto")
+    return configured === "sixel" && !hasResolution ? "blocks" : configured;
+  if (!capabilities || capabilities.multiplexer === "tmux")
+    return "blocks";
+  if (capabilities.kitty_graphics)
+    return "kitty";
+  if (capabilities.sixel && hasResolution)
+    return "sixel";
+  return "blocks";
+}
+function pixelResolution(ctx) {
+  const terminalWidth = ctx.terminalWidth ?? 0;
+  const terminalHeight = ctx.terminalHeight ?? 0;
+  const resolution = terminalWidth > 0 && terminalHeight > 0 ? ctx.resolution : null;
+  return resolution && resolution.width > 0 && resolution.height > 0 ? resolution : null;
+}
+
+class ImageRenderable extends Renderable {
+  _source;
+  _image = null;
+  _pendingImage = null;
+  _loadError = null;
+  _loadController = null;
+  onLoad;
+  onError;
+  _fit;
+  _protocol;
+  loadPromise = null;
+  constructor(ctx, options) {
+    super(ctx, options);
+    this._fit = options.fit ?? "fit";
+    this._protocol = options.protocol ?? "auto";
+    this.onLoad = options.onLoad;
+    this.onError = options.onError;
+    if (options.source !== undefined)
+      this.source = options.source;
+  }
+  get source() {
+    return this._source;
+  }
+  set source(source) {
+    source ??= undefined;
+    if (source === this._source)
+      return;
+    this._source = source;
+    this._loadController?.abort();
+    this._loadController = null;
+    this._pendingImage?.dispose();
+    this._pendingImage = null;
+    if (source === undefined) {
+      this._loadError = null;
+      this._image?.dispose();
+      this._image = null;
+      this.loadPromise = null;
+      this.requestRender();
+      return;
+    }
+    const controller = new AbortController;
+    this._loadController = controller;
+    this._loadError = null;
+    let imagePromise;
+    if (source instanceof NativeImage) {
+      try {
+        const image = source.retain();
+        this._pendingImage = image;
+        imagePromise = Promise.resolve(image);
+      } catch (error) {
+        imagePromise = Promise.reject(error);
+      }
+    } else {
+      imagePromise = NativeImage.load(source, { signal: controller.signal });
+    }
+    this.loadPromise = this.load(imagePromise, controller);
+  }
+  get image() {
+    return this._image;
+  }
+  get fit() {
+    return this._fit;
+  }
+  set fit(value) {
+    const next = value ?? "fit";
+    if (this._fit === next)
+      return;
+    this._fit = next;
+    this.requestRender();
+  }
+  get protocol() {
+    return this._protocol;
+  }
+  set protocol(value) {
+    const next = value ?? "auto";
+    if (this._protocol === next)
+      return;
+    this._protocol = next;
+    this.requestRender();
+  }
+  get effectiveProtocol() {
+    return resolveImageRenderProtocol(this._protocol, this._ctx.capabilities, pixelResolution(this._ctx) !== null);
+  }
+  get cellAspectRatio() {
+    const resolution = pixelResolution(this._ctx);
+    if (!resolution)
+      return 2;
+    const cellWidth = resolution.width / this._ctx.terminalWidth;
+    const cellHeight = resolution.height / this._ctx.terminalHeight;
+    return cellWidth > 0 && cellHeight > 0 ? cellHeight / cellWidth : 2;
+  }
+  getFittedSize(targetWidth, targetHeight, cellAspectRatio = this.cellAspectRatio, sourceWidth = this._image?.width ?? 0, sourceHeight = this._image?.height ?? 0) {
+    if (sourceWidth <= 0 || sourceHeight <= 0 || targetWidth <= 0 || targetHeight <= 0)
+      return { width: 0, height: 0 };
+    if (this._fit === "fill")
+      return { width: targetWidth, height: targetHeight };
+    const displayAspect = sourceWidth / sourceHeight * cellAspectRatio;
+    const scale = this._fit === "fit" ? Math.min(targetWidth / displayAspect, targetHeight) : Math.max(targetWidth / displayAspect, targetHeight);
+    return {
+      width: Math.max(1, Math.round(displayAspect * scale)),
+      height: Math.max(1, Math.round(scale))
+    };
+  }
+  get loading() {
+    return this._loadController !== null;
+  }
+  get loadError() {
+    return this._loadError;
+  }
+  render(buffer, deltaTime) {
+    if (this.buffered)
+      this.frameBuffer?.clear(TRANSPARENT);
+    super.render(buffer, deltaTime);
+  }
+  renderSelf(buffer) {
+    if (!this._image || this.width <= 0 || this.height <= 0)
+      return;
+    const fitted = this._fit === "cover" ? { width: this.width, height: this.height } : this.getFittedSize(this.width, this.height);
+    if (fitted.width <= 0 || fitted.height <= 0)
+      return;
+    const originX = this.buffered ? 0 : this._screenX;
+    const originY = this.buffered ? 0 : this._screenY;
+    const x = originX + Math.floor((this.width - fitted.width) / 2);
+    const y = originY + Math.floor((this.height - fitted.height) / 2);
+    const resolution = pixelResolution(this._ctx);
+    const pixelWidth = resolution ? Math.max(1, Math.round(fitted.width * resolution.width / this._ctx.terminalWidth)) : 0;
+    const pixelHeight = resolution ? Math.max(1, Math.round(fitted.height * resolution.height / this._ctx.terminalHeight)) : 0;
+    let sourceX = 0;
+    let sourceY = 0;
+    let sourceWidth = this._image.width;
+    let sourceHeight = this._image.height;
+    if (this._fit === "cover") {
+      const targetAspect = this.width / (this.height * this.cellAspectRatio);
+      const sourceAspect = sourceWidth / sourceHeight;
+      if (sourceAspect > targetAspect) {
+        sourceWidth = Math.max(1, Math.round(sourceHeight * targetAspect));
+        sourceX = Math.floor((this._image.width - sourceWidth) / 2);
+      } else {
+        sourceHeight = Math.max(1, Math.round(sourceWidth / targetAspect));
+        sourceY = Math.floor((this._image.height - sourceHeight) / 2);
+      }
+    }
+    buffer.drawImage(this._image, x, y, fitted.width, fitted.height, pixelWidth, pixelHeight, sourceX, sourceY, sourceWidth, sourceHeight, this._protocol);
+  }
+  async load(imagePromise, controller) {
+    let image;
+    try {
+      image = await imagePromise;
+    } catch (error) {
+      if (controller.signal.aborted || this.isDestroyed || this._loadController !== controller)
+        return;
+      this._loadController = null;
+      this._loadError = error;
+      this.onError?.(error);
+      return;
+    }
+    if (this.isDestroyed || this._loadController !== controller) {
+      image.dispose();
+      return;
+    }
+    if (this._pendingImage === image)
+      this._pendingImage = null;
+    const previous = this._image;
+    this._image = image;
+    this._loadController = null;
+    previous?.dispose();
+    this.requestRender();
+    this.onLoad?.(image);
+  }
+  destroySelf() {
+    this._loadController?.abort();
+    this._loadController = null;
+    this._pendingImage?.dispose();
+    this._pendingImage = null;
+    this._image?.dispose();
+    this._image = null;
+    super.destroySelf();
+  }
 }
 // ../../node_modules/.bun/marked@17.0.1/node_modules/marked/lib/marked.esm.js
 function L() {
@@ -12841,6 +14913,7 @@ export {
   rgbToHex,
   reverse,
   resolveRenderLib,
+  resolveImageRenderProtocol,
   resolveCoreSlot,
   resolveBundledFilePath,
   renderFontToFrameBuffer,
@@ -12884,6 +14957,7 @@ export {
   isEditBufferRenderable,
   instantiate,
   infoStringToFiletype,
+  imageInfo,
   hsvToRgb,
   hexToRgb,
   hastToStyledText,
@@ -12916,10 +14990,13 @@ export {
   createTextAttributes,
   createTerminalPalette,
   createSlotRegistry,
+  createRendererClipboardAdapter,
   createMarkdownCodeBlockRenderer,
   createIcyStreamDemuxer,
+  createHostClipboard,
   createExtmarksController,
   createCoreSlotRegistry,
+  createClipboard,
   createCliRenderer,
   coordinateToCharacterIndex,
   convertThemeToStyles,
@@ -13016,6 +15093,13 @@ export {
   OptimizedBuffer,
   NativeSpanFeed,
   NativeMeasureTargetKind,
+  NativeImage,
+  NativeClipboardStartStatus,
+  NativeClipboardShutdownStatus,
+  NativeClipboardOperationStatus,
+  NativeClipboardDestroyStatus,
+  NativeClipboardCopyStatus,
+  NativeClipboardCancelStatus,
   NativeAudioStreamState2 as NativeAudioStreamState,
   NativeAudioStreamFormat2 as NativeAudioStreamFormat,
   NativeAudioStreamCloseReason2 as NativeAudioStreamCloseReason,
@@ -13034,6 +15118,9 @@ export {
   InputRenderableEvents,
   InputRenderable,
   Input,
+  ImageRenderable,
+  ImageLoadError,
+  ImageError,
   INVERT_MATRIX,
   Generic,
   GREENSCALE_MATRIX,
@@ -13071,7 +15158,11 @@ export {
   BaseRenderable,
   AudioStreamError,
   AudioStream,
+  AudioRecorderError,
+  AudioRecorder,
   AudioInitializationError,
+  AudioCaptureStreamError,
+  AudioCaptureStream,
   Audio,
   ArrowRenderable,
   ATTRIBUTE_BASE_MASK,
@@ -13082,5 +15173,5 @@ export {
   ACHROMATOPSIA_MATRIX
 };
 
-//# debugId=08DB0FEEDE0D244D64756E2164756E21
+//# debugId=7EDEA741834B885264756E2164756E21
 //# sourceMappingURL=index.bun.js.map

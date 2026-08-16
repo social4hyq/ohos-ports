@@ -1,6 +1,8 @@
 import { RGBA } from "./lib/index.js";
 import { type OptimizedBufferHandle, type RenderLib } from "./zig.js";
 import { type Pointer, type PointerInput } from "./platform/ffi.js";
+import type { NativeImage } from "./image.js";
+import type { ImageRenderProtocol } from "./types.js";
 import { type BorderStyle, type BorderSides } from "./lib/index.js";
 import { TargetChannel, type WidthMethod, type CapturedLine } from "./types.js";
 import type { TextBufferView } from "./text-buffer-view.js";
@@ -58,6 +60,7 @@ export declare class OptimizedBuffer {
     drawTextBuffer(textBufferView: TextBufferView, x: number, y: number): void;
     drawEditorView(editorView: EditorView, x: number, y: number): void;
     drawSuperSampleBuffer(x: number, y: number, pixelDataPtr: PointerInput, pixelDataLength: number, format: "bgra8unorm" | "rgba8unorm", alignedBytesPerRow: number): void;
+    drawImage(image: NativeImage, x: number, y: number, width: number, height: number, pixelWidth?: number, pixelHeight?: number, sourceX?: number, sourceY?: number, sourceWidth?: number, sourceHeight?: number, protocol?: ImageRenderProtocol): boolean;
     drawPackedBuffer(dataPtr: PointerInput, dataLen: number, posX: number, posY: number, terminalWidthCells: number, terminalHeightCells: number): void;
     drawGrayscaleBuffer(posX: number, posY: number, intensities: Float32Array, srcWidth: number, srcHeight: number, fg?: RGBA | null, bg?: RGBA | null): void;
     drawGrayscaleBufferSupersampled(posX: number, posY: number, intensities: Float32Array, srcWidth: number, srcHeight: number, fg?: RGBA | null, bg?: RGBA | null): void;

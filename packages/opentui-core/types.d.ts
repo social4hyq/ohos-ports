@@ -45,6 +45,7 @@ export declare enum TargetChannel {
 export type WidthMethod = "wcwidth" | "unicode";
 export type TerminalMultiplexer = "none" | "tmux" | "zellij" | "screen" | "unknown";
 export type TerminalCapabilityState = "unknown" | "supported" | "unsupported";
+export type ImageRenderProtocol = "auto" | "kitty" | "sixel" | "blocks";
 export interface TerminalInfo {
     name: string;
     version: string;
@@ -71,6 +72,7 @@ export interface TerminalCapabilities {
     explicit_cursor_positioning: boolean;
     remote: boolean;
     multiplexer: TerminalMultiplexer;
+    image_protocol?: ImageRenderProtocol;
     terminal: TerminalInfo;
 }
 export interface RendererEvents {
@@ -95,6 +97,12 @@ export interface RenderContext extends EventEmitter {
     clearHitGridScissorRects: () => void;
     width: number;
     height: number;
+    terminalWidth?: number;
+    terminalHeight?: number;
+    resolution?: {
+        width: number;
+        height: number;
+    } | null;
     /** Monotonic, bumped once per `loop()` iteration. Lets renderables dedupe per-frame work. */
     frameId: number;
     requestRender: () => void;

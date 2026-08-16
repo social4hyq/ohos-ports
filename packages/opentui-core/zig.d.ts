@@ -1,10 +1,10 @@
 import { type FFICallbackInstance, type Pointer } from "./platform/ffi.js";
-import { type CursorStyle, type CursorStyleOptions, type TargetChannel, type DebugOverlayCorner, type WidthMethod, type TerminalCapabilities, type Highlight, type LineInfo } from "./types.js";
-export type { LineInfo, AllocatorStats, AudioStreamCreateOptions, BuildOptions, NativeAudioStreamStats, NativeRenderStats, };
+import { type CursorStyle, type CursorStyleOptions, type TargetChannel, type DebugOverlayCorner, type WidthMethod, type TerminalCapabilities, type Highlight, type LineInfo, type ImageRenderProtocol } from "./types.js";
+export type { LineInfo, AllocatorStats, AudioStreamCreateOptions, BuildOptions, NativeAudioCaptureStats, NativeAudioStreamStats, NativeRenderStats, };
 import { RGBA } from "./lib/RGBA.js";
 import { OptimizedBuffer } from "./buffer.js";
 import { TextBuffer } from "./text-buffer.js";
-import type { NativeSpanFeedOptions, NativeSpanFeedStats, ReserveInfo, AudioCreateOptions, AudioStartOptions, AudioVoiceOptions, AudioStreamCreateOptions, NativeAudioStreamCloseReason as NativeAudioStreamCloseReasonType, NativeAudioStreamFormat as NativeAudioStreamFormatType, NativeAudioStreamState as NativeAudioStreamStateType, NativeAudioStreamStats, AudioStats, BuildOptions, AllocatorStats, NativeRenderStats } from "./zig-structs.js";
+import type { NativeSpanFeedOptions, NativeSpanFeedStats, ReserveInfo, AudioCreateOptions, AudioStartOptions, AudioVoiceOptions, AudioStreamCreateOptions, NativeAudioStreamCloseReason as NativeAudioStreamCloseReasonType, NativeAudioStreamFormat as NativeAudioStreamFormatType, NativeAudioStreamState as NativeAudioStreamStateType, NativeAudioStreamStats, NativeAudioCaptureStats, AudioStats, BuildOptions, AllocatorStats, NativeRenderStats, NativeImageInfo } from "./zig-structs.js";
 export declare const NativeAudioStreamState: {
     readonly Initializing: 0;
     readonly Buffering: 1;
@@ -39,6 +39,56 @@ export type SyntaxStyleHandle = NativeHandle<"syntax_style">;
 export type EventSinkHandle = NativeHandle<"event_sink">;
 export type AudioEngineHandle = NativeHandle<"audio_engine">;
 export type NativeRenderableHandle = NativeHandle<"native_renderable">;
+export type ImageHandle = NativeHandle<"image">;
+export type ClipboardServiceHandle = number & {
+    readonly __nativeHandle: "clipboard_service";
+};
+export type ClipboardOperationHandle = number & {
+    readonly __nativeHandle: "clipboard_operation";
+};
+export declare enum NativeClipboardOperationStatus {
+    Pending = 0,
+    Read = 1,
+    Empty = 2,
+    Written = 3,
+    Cleared = 4,
+    Unsupported = 5,
+    Cancelled = 6,
+    TimedOut = 7,
+    LimitExceeded = 8,
+    Failed = 9,
+    InvalidHandle = 10
+}
+export declare enum NativeClipboardStartStatus {
+    Ok = 0,
+    InvalidService = 1,
+    ShuttingDown = 2,
+    LimitExceeded = 3,
+    InvalidArgument = 4,
+    OutOfMemory = 5
+}
+export declare enum NativeClipboardCancelStatus {
+    Requested = 0,
+    AlreadyTerminal = 1,
+    InvalidHandle = 2
+}
+export declare enum NativeClipboardCopyStatus {
+    Ok = 0,
+    BufferTooSmall = 1,
+    InvalidHandle = 2,
+    InvalidState = 3,
+    InvalidArgument = 4
+}
+export declare enum NativeClipboardDestroyStatus {
+    Destroyed = 0,
+    NotReady = 1,
+    InvalidHandle = 2
+}
+export declare enum NativeClipboardShutdownStatus {
+    Pending = 0,
+    Ready = 1,
+    InvalidHandle = 2
+}
 export declare enum LogLevel {
     Error = 0,
     Warn = 1,
@@ -62,6 +112,10 @@ export interface LogicalCursor {
     row: number;
     col: number;
     offset: number;
+}
+export interface MeasureResult {
+    lineCount: number;
+    widthColsMax: number;
 }
 export interface CursorState {
     x: number;
@@ -108,6 +162,23 @@ export interface AudioEngineLib {
     audioIsPlaybackDeviceDefault: (engine: AudioEngineHandle, index: number) => boolean;
     audioSelectPlaybackDevice: (engine: AudioEngineHandle, index: number) => number;
     audioClearPlaybackDeviceSelection: (engine: AudioEngineHandle) => void;
+    audioRefreshCaptureDevices: (engine: AudioEngineHandle) => number;
+    audioGetCaptureDeviceCount: (engine: AudioEngineHandle) => number;
+    audioGetCaptureDeviceName: (engine: AudioEngineHandle, index: number) => string;
+    audioIsCaptureDeviceDefault: (engine: AudioEngineHandle, index: number) => boolean;
+    audioSelectCaptureDevice: (engine: AudioEngineHandle, index: number) => number;
+    audioClearCaptureDeviceSelection: (engine: AudioEngineHandle) => void;
+    audioStartCapture: (engine: AudioEngineHandle, options: AudioStartOptions | undefined, channels: number, capacityFrames: number) => number;
+    audioStopCapture: (engine: AudioEngineHandle) => number;
+    audioIsCaptureRunning: (engine: AudioEngineHandle) => boolean;
+    audioReadCapture: (engine: AudioEngineHandle, outBuffer: Float32Array, frameCount: number) => {
+        status: number;
+        framesRead: number;
+    };
+    audioGetCaptureStats: (engine: AudioEngineHandle) => {
+        status: number;
+        stats: NativeAudioCaptureStats | null;
+    };
     audioStart: (engine: AudioEngineHandle, options?: AudioStartOptions | null) => number;
     audioStartMixer: (engine: AudioEngineHandle) => number;
     audioStop: (engine: AudioEngineHandle) => number;
@@ -195,6 +266,7 @@ export interface RenderLib extends AudioEngineLib {
     bufferColorMatrix: (buffer: OptimizedBufferHandle, matrixPtr: Pointer, cellMaskPtr: Pointer, cellMaskCount: number, strength: number, target: TargetChannel) => void;
     bufferColorMatrixUniform: (buffer: OptimizedBufferHandle, matrixPtr: Pointer, strength: number, target: TargetChannel) => void;
     bufferDrawSuperSampleBuffer: (buffer: OptimizedBufferHandle, x: number, y: number, pixelDataPtr: Pointer, pixelDataLength: number, format: "bgra8unorm" | "rgba8unorm", alignedBytesPerRow: number) => void;
+    bufferDrawImage: (buffer: OptimizedBufferHandle, image: ImageHandle, x: number, y: number, width: number, height: number, pixelWidth: number, pixelHeight: number, sourceX: number, sourceY: number, sourceWidth: number, sourceHeight: number, protocol: ImageRenderProtocol) => boolean;
     bufferDrawPackedBuffer: (buffer: OptimizedBufferHandle, dataPtr: Pointer, dataLen: number, posX: number, posY: number, terminalWidthCells: number, terminalHeightCells: number) => void;
     bufferDrawGrayscaleBuffer: (buffer: OptimizedBufferHandle, posX: number, posY: number, intensitiesPtr: Pointer, srcWidth: number, srcHeight: number, fg: RGBA | null, bg: RGBA | null) => void;
     bufferDrawGrayscaleBufferSupersampled: (buffer: OptimizedBufferHandle, posX: number, posY: number, intensitiesPtr: Pointer, srcWidth: number, srcHeight: number, fg: RGBA | null, bg: RGBA | null) => void;
@@ -214,6 +286,45 @@ export interface RenderLib extends AudioEngineLib {
     setTerminalTitle: (renderer: RendererHandle, title: string) => void;
     copyToClipboardOSC52: (renderer: RendererHandle, target: number, textUtf8: Uint8Array) => boolean;
     clearClipboardOSC52: (renderer: RendererHandle, target: number) => boolean;
+    clipboardServiceCreate: (maxConcurrentOperations: number, maxProviderTransfers: number, waylandSeat?: string) => ClipboardServiceHandle | null;
+    clipboardServiceBeginShutdown: (service: ClipboardServiceHandle) => NativeClipboardShutdownStatus;
+    clipboardServicePollShutdown: (service: ClipboardServiceHandle) => NativeClipboardShutdownStatus;
+    clipboardServiceDestroy: (service: ClipboardServiceHandle) => NativeClipboardDestroyStatus;
+    clipboardServiceDrain: (service: ClipboardServiceHandle) => number;
+    clipboardReadOperationStart: (service: ClipboardServiceHandle, request: Uint8Array, selection: number, maxBytes: number, maxImagePixels: number, maxConversionBytes: number, timeoutMs: number) => {
+        status: NativeClipboardStartStatus;
+        operation: ClipboardOperationHandle | null;
+    };
+    clipboardWriteOperationStart: (service: ClipboardServiceHandle, textUtf8: Uint8Array, selection: number, timeoutMs: number) => {
+        status: NativeClipboardStartStatus;
+        operation: ClipboardOperationHandle | null;
+    };
+    clipboardClearOperationStart: (service: ClipboardServiceHandle, selection: number, timeoutMs: number) => {
+        status: NativeClipboardStartStatus;
+        operation: ClipboardOperationHandle | null;
+    };
+    clipboardOperationPoll: (operation: ClipboardOperationHandle) => NativeClipboardOperationStatus;
+    clipboardOperationCancel: (operation: ClipboardOperationHandle) => NativeClipboardCancelStatus;
+    clipboardOperationResultMimeLength: (operation: ClipboardOperationHandle) => {
+        status: NativeClipboardCopyStatus;
+        length: number;
+    };
+    clipboardOperationResultMimeCopy: (operation: ClipboardOperationHandle, output: Uint8Array) => NativeClipboardCopyStatus;
+    clipboardOperationResultDataLength: (operation: ClipboardOperationHandle) => {
+        status: NativeClipboardCopyStatus;
+        length: number;
+    };
+    clipboardOperationResultDataCopy: (operation: ClipboardOperationHandle, output: Uint8Array) => NativeClipboardCopyStatus;
+    clipboardOperationResultErrorCode: (operation: ClipboardOperationHandle) => {
+        status: NativeClipboardCopyStatus;
+        errorCode: number;
+    };
+    clipboardOperationResultDiagnosticLength: (operation: ClipboardOperationHandle) => {
+        status: NativeClipboardCopyStatus;
+        length: number;
+    };
+    clipboardOperationResultDiagnosticCopy: (operation: ClipboardOperationHandle, output: Uint8Array) => NativeClipboardCopyStatus;
+    clipboardOperationDestroy: (operation: ClipboardOperationHandle) => NativeClipboardDestroyStatus;
     triggerNotification: (renderer: RendererHandle, message: string, title?: string) => boolean;
     addToHitGrid: (renderer: RendererHandle, x: number, y: number, width: number, height: number, id: number) => void;
     clearCurrentHitGrid: (renderer: RendererHandle) => void;
@@ -347,10 +458,7 @@ export interface RenderLib extends AudioEngineLib {
     textBufferViewSetTabIndicator: (view: TextBufferViewHandle, indicator: number) => void;
     textBufferViewSetTabIndicatorColor: (view: TextBufferViewHandle, color: RGBA) => void;
     textBufferViewSetTruncate: (view: TextBufferViewHandle, truncate: boolean) => void;
-    textBufferViewMeasureForDimensions: (view: TextBufferViewHandle, width: number, height: number) => {
-        lineCount: number;
-        widthColsMax: number;
-    } | null;
+    textBufferViewMeasureForDimensions: (view: TextBufferViewHandle, width: number, height: number) => MeasureResult | null;
     textBufferViewGetVirtualLineCount: (view: TextBufferViewHandle) => number;
     readonly encoder: TextEncoder;
     readonly decoder: TextDecoder;
@@ -486,6 +594,58 @@ export interface RenderLib extends AudioEngineLib {
     syntaxStyleRegister: (style: SyntaxStyleHandle, name: string, fg: RGBA | null, bg: RGBA | null, attributes: number) => number;
     syntaxStyleResolveByName: (style: SyntaxStyleHandle, name: string) => number | null;
     syntaxStyleGetStyleCount: (style: SyntaxStyleHandle) => number;
+    imageInfo: (data: Uint8Array) => {
+        status: number;
+        info: NativeImageInfo;
+    };
+    imageRetainIccCache: () => void;
+    imageReleaseIccCache: () => void;
+    imageTestFailIccProfileCopyAllocationOnce: () => void;
+    imageDecode: (data: Uint8Array) => {
+        status: number;
+        handle: ImageHandle | null;
+    };
+    imageCreateFromRgba: (pixels: Uint8Array, width: number, height: number, stride: number) => {
+        status: number;
+        handle: ImageHandle | null;
+    };
+    imageDestroy: (image: ImageHandle) => void;
+    imageRetain: (image: ImageHandle) => {
+        status: number;
+        handle: ImageHandle | null;
+    };
+    imageGetInfo: (image: ImageHandle) => {
+        status: number;
+        info: NativeImageInfo;
+    };
+    imageMaterialize: (image: ImageHandle) => number;
+    imageEnsureEncodedPng: (image: ImageHandle) => number;
+    imageGetPixelsPtr: (image: ImageHandle) => Pointer | null;
+    imageClone: (image: ImageHandle) => {
+        status: number;
+        handle: ImageHandle | null;
+    };
+    imageCopyPixels: (image: ImageHandle, destination: Uint8Array, stride: number, bgra: boolean) => number;
+    imageResize: (image: ImageHandle, width: number, height: number, filter: number) => {
+        status: number;
+        handle: ImageHandle | null;
+    };
+    imageExtract: (image: ImageHandle, left: number, top: number, width: number, height: number) => {
+        status: number;
+        handle: ImageHandle | null;
+    };
+    imageExtend: (image: ImageHandle, top: number, right: number, bottom: number, left: number, background: Uint8Array) => {
+        status: number;
+        handle: ImageHandle | null;
+    };
+    imageTransform: (image: ImageHandle, operation: number) => {
+        status: number;
+        handle: ImageHandle | null;
+    };
+    imageComposite: (base: ImageHandle, overlay: ImageHandle, left: number, top: number, blend: number, opacity: number) => {
+        status: number;
+        handle: ImageHandle | null;
+    };
     getTerminalCapabilities: (renderer: RendererHandle) => TerminalCapabilities;
     processCapabilityResponse: (renderer: RendererHandle, response: string) => void;
     encodeUnicode: (text: string, widthMethod: WidthMethod) => {

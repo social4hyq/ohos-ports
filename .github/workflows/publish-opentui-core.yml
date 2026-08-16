@@ -3,8 +3,8 @@ name: Publish @ohos-ports/opentui-core
 # No build step: this package reuses the upstream @opentui/core-linux-arm64-musl
 # libopentui.so as-is (OHOS is musl-ABI-compatible, verified by dlopen + FFI call
 # on a real OHOS device) with a patched resolveNativeLibraryPath() that adds an
-# openharmony branch pointing at the bundled .so (bun path: chunk-bun-t2myhmwd.js;
-# node path: chunk-node-q0cwyvm9.js), plus an `openharmony` entry in each file's
+# openharmony branch pointing at the bundled .so (bun path: chunk-bun-26r5c5w5.js;
+# node path: chunk-node-aj3n20gq.js), plus an `openharmony` entry in each file's
 # NATIVE_FILE_NAMES so getNativeAssetDescriptor() doesn't throw before reaching
 # that branch. The .so itself is committed to this repo (already stripped +
 # self-signed), so publish is just `npm publish`.
@@ -80,7 +80,7 @@ jobs:
             node --check "$f"
           done
 
-          for f in chunk-bun-t2myhmwd.js chunk-node-q0cwyvm9.js; do
+          for f in chunk-bun-26r5c5w5.js chunk-node-aj3n20gq.js; do
             grep -q 'openharmony: "libopentui.so"' "$f"
             grep -q 'process.platform === "openharmony"' "$f"
           done

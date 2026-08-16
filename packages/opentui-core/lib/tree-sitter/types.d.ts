@@ -142,6 +142,7 @@ export type TreeSitterWorkerResponse = {
 } | {
     type: "ERROR";
     bufferId?: number;
+    messageId?: string;
     error: string;
 } | {
     type: "WORKER_LOG";

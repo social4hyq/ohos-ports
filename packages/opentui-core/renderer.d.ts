@@ -72,6 +72,10 @@ export interface CliRendererStats extends NativeRenderStats {
 export interface CliRendererFrameEvent {
     frameId: number;
 }
+export interface CliRendererErrorEvent {
+    error: Error;
+    renderable: Renderable | undefined;
+}
 export interface RendererSchedulerState {
     isRunning: boolean;
     isRendering: boolean;
@@ -150,6 +154,7 @@ export declare class MouseEvent {
     };
     readonly scroll?: ScrollInfo;
     readonly target: Renderable | null;
+    readonly currentTarget: Renderable | null;
     readonly isDragging?: boolean;
     private _propagationStopped;
     private _defaultPrevented;
@@ -161,6 +166,10 @@ export declare class MouseEvent {
     });
     stopPropagation(): void;
     preventDefault(): void;
+}
+export interface CliRendererHandlerErrorEvent {
+    error: unknown;
+    event: MouseEvent;
 }
 export declare enum MouseButton {
     LEFT = 0,
@@ -178,6 +187,8 @@ export declare function createCliRenderer(config?: CliRendererConfig): Promise<C
 export declare enum CliRenderEvents {
     RESIZE = "resize",
     FRAME = "frame",
+    RENDER_ERROR = "render:error",
+    HANDLER_ERROR = "handler:error",
     EXTERNAL_OUTPUT = "external_output",
     FOCUS = "focus",
     BLUR = "blur",
@@ -232,6 +243,7 @@ export declare class CliRenderer extends EventEmitter implements RenderContext {
     private postProcessFns;
     private backgroundColor;
     private waitingForPixelResolution;
+    private pixelResolutionRequeryPending;
     private readonly clock;
     private rendering;
     private renderingNative;
@@ -262,6 +274,7 @@ export declare class CliRenderer extends EventEmitter implements RenderContext {
     private animationRequest;
     private resizeTimeoutId;
     private capabilityTimeoutId;
+    private terminalKeepAliveTimer;
     private xtVersionWaiters;
     private splitStartupSeedTimeoutId;
     private pendingSplitStartupCursorSeed;
@@ -323,6 +336,7 @@ export declare class CliRenderer extends EventEmitter implements RenderContext {
     private idleResolvers;
     private _debugInputs;
     private _debugModeEnabled;
+    private readonly stdinLogPath;
     private handleError;
     private dumpOutputCache;
     private exitHandler;
@@ -349,8 +363,8 @@ export declare class CliRenderer extends EventEmitter implements RenderContext {
      *   - Calls `lib.createRenderer` → native Zig allocation
      *   - Registers in the process-wide `rendererTracker`
      *   - Adds `process.on(...)` listeners for SIGWINCH (process.stdout only),
-     *     "warning", "uncaughtException", "unhandledRejection", "beforeExit",
-     *     plus the configured `exitSignals`
+     *     "warning", "uncaughtException", "unhandledRejection", plus the
+     *     configured `exitSignals`
      *   - Replaces `global.requestAnimationFrame` with the renderer's impl
      *   - When `setupTerminal()` is called, it will put `stdin` in raw mode and
      *     call `stdin.resume()`
@@ -361,6 +375,8 @@ export declare class CliRenderer extends EventEmitter implements RenderContext {
      */
     constructor(stdin: NodeJS.ReadStream, stdout: NodeJS.WriteStream, width: number, height: number, config?: CliRendererConfig);
     private addExitListeners;
+    private startTerminalKeepAlive;
+    private stopTerminalKeepAlive;
     private removeExitListeners;
     get isDestroyed(): boolean;
     registerLifecyclePass(renderable: Renderable): void;
@@ -483,6 +499,7 @@ export declare class CliRenderer extends EventEmitter implements RenderContext {
     private handleStdinParserFailure;
     private setupInput;
     private dispatchMouseEvent;
+    private sendMouseEvent;
     private processSingleMouseEvent;
     /**
      * Recheck hover state after hit grid changes.

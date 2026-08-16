@@ -37,6 +37,9 @@ export declare class CodeRenderable extends TextBufferRenderable {
     private _treeSitterClient;
     private _highlightsDirty;
     private _highlightSnapshotId;
+    private _highlightLoopActive;
+    private _highlightPromise?;
+    private _highlightRerun;
     private _conceal;
     private _drawUnstyledText;
     private _shouldRenderTextBuffer;
@@ -58,6 +61,7 @@ export declare class CodeRenderable extends TextBufferRenderable {
     };
     constructor(ctx: RenderContext, options: CodeOptions);
     get content(): string;
+    private invalidateHighlights;
     set content(value: string);
     get lineInfo(): LineInfo;
     get wrapMode(): "none" | "char" | "word";
@@ -88,10 +92,13 @@ export declare class CodeRenderable extends TextBufferRenderable {
     protected transformChunks(chunks: TextChunk[], context: ChunkRenderContext): Promise<TextChunk[]>;
     private ensureVisibleTextBeforeHighlight;
     private startHighlight;
+    private runHighlights;
+    private clearPendingHighlight;
     private setRenderedLineSources;
     private static isIdentityLineSources;
     private static getMergedConcealLineRanges;
     private getConcealLinesSourceMap;
     getLineHighlights(lineIdx: number): import("../types.js").Highlight[];
     protected renderSelf(buffer: OptimizedBuffer): void;
+    destroy(): void;
 }

@@ -44,6 +44,11 @@ export declare const TerminalCapabilitiesStruct: import("bun-ffi-structs").Defin
     zellij: number;
     screen: number;
     unknown: number;
+}>], readonly ["image_protocol", import("bun-ffi-structs").EnumDef<{
+    auto: number;
+    kitty: number;
+    sixel: number;
+    blocks: number;
 }>], readonly ["term_name", "char*"], readonly ["term_name_len", "u64", {
     readonly lengthOf: "term_name";
 }], readonly ["term_version", "char*"], readonly ["term_version_len", "u64", {
@@ -54,6 +59,18 @@ export declare const TerminalCapabilitiesStruct: import("bun-ffi-structs").Defin
     unsupported: number;
 }>]], {}>;
 export declare const EncodedCharStruct: import("bun-ffi-structs").DefineStructReturnType<[readonly ["width", "u8"], readonly ["char", "u32"]], {}>;
+export interface NativeImageInfo {
+    width: number;
+    height: number;
+    sourceWidth: number;
+    sourceHeight: number;
+    format: number;
+    colorStatus: number;
+    orientation: number;
+    hasAlpha: number;
+}
+export declare const NativeImageInfoStruct: import("bun-ffi-structs").DefineStructReturnType<[readonly ["width", "u32"], readonly ["height", "u32"], readonly ["sourceWidth", "u32"], readonly ["sourceHeight", "u32"], readonly ["format", "u32"], readonly ["colorStatus", "u32"], readonly ["orientation", "u32"], readonly ["hasAlpha", "u32"]], {}>;
+export declare const ImageDrawOptionsStruct: import("bun-ffi-structs").DefineStructReturnType<[readonly ["x", "i32"], readonly ["y", "i32"], readonly ["width", "u32"], readonly ["height", "u32"], readonly ["pixelWidth", "u32"], readonly ["pixelHeight", "u32"], readonly ["sourceX", "u32"], readonly ["sourceY", "u32"], readonly ["sourceWidth", "u32"], readonly ["sourceHeight", "u32"], readonly ["protocol", "u32"]], {}>;
 export declare const LineInfoStruct: import("bun-ffi-structs").DefineStructReturnType<[readonly ["startCols", readonly ["u32"]], readonly ["startColsLen", "u32", {
     readonly lengthOf: "startCols";
 }], readonly ["widthCols", readonly ["u32"]], readonly ["widthColsLen", "u32", {
@@ -146,31 +163,25 @@ export declare const NativeSpanFeedOptionsStruct: import("bun-ffi-structs").Defi
     readonly default: 0;
 }]], {}>;
 export declare const NativeSpanFeedStatsStruct: import("bun-ffi-structs").DefineStructReturnType<[readonly ["bytesWritten", "u64"], readonly ["spansCommitted", "u64"], readonly ["chunks", "u32"], readonly ["pendingSpans", "u32"]], {}>;
-export declare const SpanInfoStruct: import("bun-ffi-structs").DefineStructReturnType<[readonly ["chunkPtr", "pointer"], readonly ["offset", "u32"], readonly ["len", "u32"], readonly ["chunkIndex", "u32"], readonly ["reserved", "u32", {
-    readonly default: 0;
-}]], {
-    readonly reduceValue: (value: {
-        chunkPtr: Pointer;
-        offset: number;
-        len: number;
-        chunkIndex: number;
-    }) => {
-        chunkPtr: Pointer;
-        offset: number;
-        len: number;
-        chunkIndex: number;
-    };
+export declare const SpanInfoStruct: import("bun-ffi-structs").StructDef<{
+    chunkPtr: Pointer;
+    offset: number;
+    len: number;
+    chunkIndex: number;
+}, {
+    offset: number;
+    chunkPtr: ArrayBufferLike | import("bun-ffi-structs").Pointer | ArrayBufferView<ArrayBufferLike>;
+    len: number;
+    chunkIndex: number;
+    reserved?: number | null | undefined;
 }>;
-export declare const ReserveInfoStruct: import("bun-ffi-structs").DefineStructReturnType<[readonly ["ptr", "pointer"], readonly ["len", "u32"], readonly ["reserved", "u32", {
-    readonly default: 0;
-}]], {
-    readonly reduceValue: (value: {
-        ptr: Pointer;
-        len: number;
-    }) => {
-        ptr: Pointer;
-        len: number;
-    };
+export declare const ReserveInfoStruct: import("bun-ffi-structs").StructDef<{
+    ptr: Pointer;
+    len: number;
+}, {
+    len: number;
+    ptr: ArrayBufferLike | import("bun-ffi-structs").Pointer | ArrayBufferView<ArrayBufferLike>;
+    reserved?: number | null | undefined;
 }>;
 export type AudioCreateOptions = {
     sampleRate?: number;
@@ -252,6 +263,15 @@ export type AudioStats = {
     lastPeak: number;
     lastRms: number;
 };
+export type NativeAudioCaptureStats = {
+    framesReceived: bigint;
+    framesRead: bigint;
+    framesDropped: bigint;
+    sampleRate: number;
+    channels: number;
+    bufferedFrames: number;
+    capacityFrames: number;
+};
 export declare const AudioCreateOptionsStruct: import("bun-ffi-structs").DefineStructReturnType<[readonly ["sampleRate", "u32", {
     readonly default: 48000;
 }], readonly ["playbackChannels", "u32", {
@@ -299,5 +319,6 @@ export declare const AudioVoiceOptionsStruct: import("bun-ffi-structs").DefineSt
 }]], {}>;
 export declare const AudioStreamCreateOptionsStruct: import("bun-ffi-structs").DefineStructReturnType<[readonly ["capacityMs", "u32"], readonly ["startupMs", "u32"], readonly ["resumeMs", "u32"], readonly ["volume", "f32"], readonly ["pan", "f32"], readonly ["groupId", "u32"], readonly ["maxProbeBytes", "u32"], readonly ["format", "u32"]], {}>;
 export declare const AudioStreamStatsStruct: import("bun-ffi-structs").DefineStructReturnType<[readonly ["bytesReceived", "u64"], readonly ["framesDecoded", "u64"], readonly ["framesPlayed", "u64"], readonly ["state", "u32"], readonly ["sampleRate", "u32"], readonly ["channels", "u32"], readonly ["bufferedFrames", "u32"], readonly ["capacityFrames", "u32"], readonly ["underruns", "u32"], readonly ["errorCode", "i32"], readonly ["readyGeneration", "u32"]], {}>;
+export declare const AudioCaptureStatsStruct: import("bun-ffi-structs").DefineStructReturnType<[readonly ["framesReceived", "u64"], readonly ["framesRead", "u64"], readonly ["framesDropped", "u64"], readonly ["sampleRate", "u32"], readonly ["channels", "u32"], readonly ["bufferedFrames", "u32"], readonly ["capacityFrames", "u32"]], {}>;
 export declare const AudioStatsStruct: import("bun-ffi-structs").DefineStructReturnType<[readonly ["soundsLoaded", "u32"], readonly ["voicesActive", "u32"], readonly ["framesMixed", "u64"], readonly ["lockMisses", "u32"], readonly ["lastPeak", "f32"], readonly ["lastRms", "f32"]], {}>;
 export {};

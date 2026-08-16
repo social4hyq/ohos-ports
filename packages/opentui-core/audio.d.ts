@@ -151,7 +151,68 @@ export interface AudioPlaybackDevice {
     name: string;
     isDefault: boolean;
 }
-export type AudioAction = "createAudioEngine" | "start" | "startMixer" | "stop" | "loadSound" | "loadSoundFile" | "unloadSound" | "group" | "play" | "stopVoice" | "setVoiceGroup" | "setGroupVolume" | "setMasterVolume" | "mixFrames" | "enableTap" | "readTapFrames" | "listPlaybackDevices" | "selectPlaybackDevice" | "clearPlaybackDeviceSelection" | "getStats";
+export interface AudioCaptureDevice {
+    index: number;
+    name: string;
+    isDefault: boolean;
+}
+export interface AudioCaptureOptions {
+    channels?: number;
+    capacityFrames?: number;
+    startOptions?: AudioStartOptions;
+}
+export interface AudioCaptureStreamOptions extends AudioCaptureOptions {
+    chunkFrames?: number;
+    signal?: AbortSignal;
+}
+export type AudioCaptureStreamState = "initializing" | "capturing" | "stopping" | "stopped" | "errored" | "disposed";
+export type AudioCaptureStreamAction = "start" | "read" | "stop" | "stats" | "destroy";
+export interface AudioCaptureStreamErrorContext {
+    action: AudioCaptureStreamAction;
+    status?: number;
+}
+export interface AudioCaptureStreamEvents {
+    stopped: [];
+    error: [error: AudioCaptureStreamError, context: AudioCaptureStreamErrorContext];
+    disposed: [];
+}
+export interface AudioCaptureStats {
+    sampleRate: number;
+    channels: number;
+    capacityFrames: number;
+    bufferedFrames: number;
+    framesReceived: bigint;
+    framesRead: bigint;
+    framesDropped: bigint;
+}
+export interface AudioCaptureStreamStats extends AudioCaptureStats {
+    state: AudioCaptureStreamState;
+    bufferedDurationMs: number;
+}
+export interface AudioCaptureReadResult {
+    frames: Float32Array;
+    framesRead: number;
+}
+export type AudioRecordToFileOptions = AudioCaptureStreamOptions;
+export type AudioRecorderState = "initializing" | "recording" | "stopping" | "stopped" | "errored" | "disposed";
+export type AudioRecorderAction = "open" | "start" | "read" | "write" | "stop" | "finalize" | "publish" | "stats" | "destroy";
+export interface AudioRecorderErrorContext {
+    action: AudioRecorderAction;
+    status?: number;
+}
+export interface AudioRecorderEvents {
+    stopped: [];
+    error: [error: AudioRecorderError, context: AudioRecorderErrorContext];
+    disposed: [];
+}
+export interface AudioRecorderStats extends AudioCaptureStats {
+    state: AudioRecorderState;
+    bufferedDurationMs: number;
+    framesWritten: bigint;
+    dataBytesWritten: bigint;
+    durationMs: number;
+}
+export type AudioAction = "createAudioEngine" | "start" | "startMixer" | "stop" | "loadSound" | "loadSoundFile" | "unloadSound" | "group" | "play" | "stopVoice" | "setVoiceGroup" | "setGroupVolume" | "setMasterVolume" | "mixFrames" | "enableTap" | "readTapFrames" | "listPlaybackDevices" | "selectPlaybackDevice" | "clearPlaybackDeviceSelection" | "listCaptureDevices" | "selectCaptureDevice" | "clearCaptureDeviceSelection" | "startCapture" | "readCaptureFrames" | "getCaptureStats" | "stopCapture" | "getStats";
 export interface AudioErrorContext {
     action: AudioAction;
     status?: number;
@@ -160,6 +221,8 @@ export interface AudioEvents {
     error: [error: Error, context: AudioErrorContext];
     started: [];
     mixerStarted: [];
+    captureStarted: [];
+    captureStopped: [];
     stopped: [];
     disposed: [];
 }
@@ -168,6 +231,14 @@ export declare class AudioInitializationError extends Error {
     readonly action: AudioInitializationAction;
     readonly status?: number;
     constructor(action: AudioInitializationAction, message: string, status?: number, cause?: unknown);
+}
+export declare class AudioCaptureStreamError extends Error {
+    readonly context: AudioCaptureStreamErrorContext;
+    constructor(message: string, context: AudioCaptureStreamErrorContext, cause?: unknown);
+}
+export declare class AudioRecorderError extends Error {
+    readonly context: AudioRecorderErrorContext;
+    constructor(message: string, context: AudioRecorderErrorContext, cause?: unknown);
 }
 export declare class AudioStreamError extends Error {
     readonly context: AudioStreamErrorContext;
@@ -241,6 +312,113 @@ export declare class AudioStream<M = AudioStreamMetadata> extends EventEmitter<A
     private toPublicStats;
     private removeOwner;
 }
+export declare class AudioCaptureStream extends EventEmitter<AudioCaptureStreamEvents> {
+    readonly readable: ReadableStream<Float32Array>;
+    readonly sampleRate: number;
+    readonly channels: number;
+    readonly chunkFrames: number;
+    readonly closed: Promise<void>;
+    private readonly init;
+    private readonly lifecycleController;
+    private streamController;
+    private nativeStats;
+    private currentState;
+    private pendingFrames;
+    private readonly pendingSamples;
+    private producerStopAttempted;
+    private producerStopped;
+    private producerMayBeRunning;
+    private ownerRemoved;
+    private exposed;
+    private terminal;
+    private discardRequested;
+    private discardDecisionScheduled;
+    private pumpPromise;
+    private producerCleanupPromise;
+    private lastCleanupFailure;
+    private terminalCompletionPromise;
+    private closedResolve;
+    private readonly signalAbortListener;
+    private constructor();
+    get state(): AudioCaptureStreamState;
+    private open;
+    getStats(): AudioCaptureStreamStats;
+    stop(): void;
+    dispose(): void;
+    private disposeInternal;
+    private pull;
+    private pump;
+    private pumpSource;
+    private discardNativeRing;
+    private requestDiscardDrain;
+    private scheduleDiscardIfIdle;
+    private refreshStats;
+    private observeProducer;
+    private stopProducer;
+    private finishStopped;
+    private fail;
+    private operationError;
+    private cleanupProducer;
+    private retryTerminalCleanup;
+    private publicStats;
+    private refreshFinalStats;
+    private removeOwner;
+    private emitTerminal;
+}
+export declare class AudioRecorder extends EventEmitter<AudioRecorderEvents> {
+    private static readonly fileSystem;
+    readonly filePath: string;
+    readonly format: "wav";
+    readonly sampleRate: number;
+    readonly channels: number;
+    readonly closed: Promise<void>;
+    private readonly init;
+    private currentState;
+    private capture;
+    private reader;
+    private fileHandle;
+    private tempPath;
+    private captureStats;
+    private framesWritten;
+    private dataBytesWritten;
+    private stopRequested;
+    private terminal;
+    private terminationRequest;
+    private publicationStarted;
+    private exposed;
+    private ownerRemoved;
+    private cleanupPromise;
+    private resourceCleanupPromise;
+    private retainedCleanupScheduled;
+    private lifecyclePromise;
+    private closedResolve;
+    private readonly signalAbortListener;
+    private readonly captureErrorListener;
+    private constructor();
+    get state(): AudioRecorderState;
+    private open;
+    getStats(): AudioRecorderStats;
+    stop(): void;
+    dispose(): void;
+    private consume;
+    private writeSamples;
+    private readWithStats;
+    private complete;
+    private publish;
+    private fail;
+    private requestTermination;
+    private finishCleanup;
+    private cleanupOwnedResources;
+    private retryRetainedCleanup;
+    private scheduleRetainedCleanup;
+    private hasRetainedResources;
+    private openTemporaryFile;
+    private writeFully;
+    private ensureOpening;
+    private fromCaptureError;
+    private removeOwner;
+    private emitTerminal;
+}
 export declare class Audio extends EventEmitter<AudioEvents> {
     static create(options?: AudioSetupOptions): Audio;
     readonly sampleRate: number;
@@ -251,6 +429,13 @@ export declare class Audio extends EventEmitter<AudioEvents> {
     private readonly streams;
     private playbackStarted;
     private mixerStarted;
+    private captureStarted;
+    private captureDeviceOpen;
+    private captureBufferAvailable;
+    private captureChannels;
+    private captureCapacityFrames;
+    private captureOwner;
+    private captureStream;
     private disposing;
     private constructor();
     private throwAfterInitializationCleanup;
@@ -283,6 +468,22 @@ export declare class Audio extends EventEmitter<AudioEvents> {
     listPlaybackDevices(): AudioPlaybackDevice[] | null;
     selectPlaybackDevice(index: number): boolean;
     clearPlaybackDeviceSelection(): void;
+    openCapture(options?: AudioCaptureStreamOptions): Promise<AudioCaptureStream>;
+    recordToFile(filePath: string, options?: AudioRecordToFileOptions): Promise<AudioRecorder>;
+    listCaptureDevices(): AudioCaptureDevice[] | null;
+    selectCaptureDevice(index: number): boolean;
+    clearCaptureDeviceSelection(): void;
+    startCapture(options?: AudioCaptureOptions): boolean;
+    isCapturing(): boolean;
+    private isCapturingInternal;
+    readCaptureFrames(frameCount: number): AudioCaptureReadResult | null;
+    getCaptureStats(): AudioCaptureStats | null;
+    stopCapture(): boolean;
+    private emitCaptureOwnershipError;
+    private startCaptureInternal;
+    private readCaptureInternal;
+    private getCaptureStatsInternal;
+    private stopCaptureInternal;
     getStats(): AudioStats | null;
     dispose(): void;
 }

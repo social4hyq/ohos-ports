@@ -1,11 +1,11 @@
 import {
   ANSI,
   CliRenderer
-} from "./chunk-node-51kpf0mz.js";
+} from "./chunk-node-kq7as74d.js";
 import {
   SystemClock,
   TreeSitterClient
-} from "./chunk-node-q0cwyvm9.js";
+} from "./chunk-node-aj3n20gq.js";
 
 // src/testing/mock-keys.ts
 import { Buffer as Buffer2 } from "node:buffer";
@@ -797,6 +797,7 @@ function createTerminalCapabilities(overrides = {}) {
     explicit_cursor_positioning: false,
     remote: false,
     multiplexer: "none",
+    image_protocol: "auto",
     ...overrides,
     terminal: {
       name: "",
@@ -1000,5 +1001,5 @@ export {
   KeyCodes
 };
 
-//# debugId=08D19767EB8430A064756E2164756E21
+//# debugId=61BD210642FDD57D64756E2164756E21
 //# sourceMappingURL=testing.js.map

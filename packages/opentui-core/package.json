@@ -4,7 +4,7 @@
   "main": "index.node.js",
   "types": "index.d.ts",
   "type": "module",
-  "version": "0.4.5-patch.1",
+  "version": "0.5.3",
   "description": "OpenTUI is a TypeScript library on a native Zig core for building terminal user interfaces (TUIs) — OpenHarmony (OHOS) port, reuses the upstream linux-arm64-musl libopentui.so (OHOS is musl-ABI-compatible) bundled directly, since that platform package's own os:[\"linux\"] gate blocks installation on process.platform === \"openharmony\".",
   "license": "MIT",
   "repository": {
@@ -65,7 +65,7 @@
     }
   },
   "dependencies": {
-    "bun-ffi-structs": "0.2.4",
+    "bun-ffi-structs": "0.3.1",
     "diff": "9.0.0",
     "marked": "17.0.1",
     "string-width": "7.2.0",
@@ -75,13 +75,13 @@
     "web-tree-sitter": "0.25.10"
   },
   "optionalDependencies": {
-    "@opentui/core-darwin-x64": "0.4.5",
-    "@opentui/core-darwin-arm64": "0.4.5",
-    "@opentui/core-linux-x64": "0.4.5",
-    "@opentui/core-linux-arm64": "0.4.5",
-    "@opentui/core-win32-x64": "0.4.5",
-    "@opentui/core-win32-arm64": "0.4.5",
-    "@opentui/core-linux-x64-musl": "0.4.5",
-    "@opentui/core-linux-arm64-musl": "0.4.5"
+    "@opentui/core-darwin-x64": "0.5.3",
+    "@opentui/core-darwin-arm64": "0.5.3",
+    "@opentui/core-linux-x64": "0.5.3",
+    "@opentui/core-linux-arm64": "0.5.3",
+    "@opentui/core-win32-x64": "0.5.3",
+    "@opentui/core-win32-arm64": "0.5.3",
+    "@opentui/core-linux-x64-musl": "0.5.3",
+    "@opentui/core-linux-arm64-musl": "0.5.3"
   }
 }

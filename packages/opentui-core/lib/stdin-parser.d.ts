@@ -52,6 +52,8 @@ export declare class StdinParser {
     private timeoutId;
     private destroyed;
     private pendingSinceMs;
+    private pendingTimeoutPaused;
+    private suspendedPixelResolutionPrefixLength;
     private forceFlush;
     private justFlushedEsc;
     private state;
@@ -69,6 +71,9 @@ export declare class StdinParser {
     flushTimeout(nowMsValue?: number): void;
     private tryForceFlush;
     reset(): void;
+    hasPendingPixelResolutionResponse(): boolean;
+    pausePendingTimeout(): void;
+    resumePendingTimeout(): void;
     resetMouseState(): void;
     destroy(): void;
     private ensureAlive;

@@ -332,10 +332,13 @@ interface RenderCommandPopOpacity extends RenderCommandBase {
 export type RenderCommand = RenderCommandPushScissorRect | RenderCommandPopScissorRect | RenderCommandRender | RenderCommandPushOpacity | RenderCommandPopOpacity;
 export declare class RootRenderable extends Renderable {
     private renderList;
+    private _currentRenderable;
     private appliedLayoutGeneration;
     private appliedRenderListRevision;
     private renderListReusable;
     constructor(ctx: RenderContext);
+    get currentRenderable(): Renderable | undefined;
+    takeCurrentRenderable(): Renderable | undefined;
     render(buffer: OptimizedBuffer, deltaTime: number): void;
     protected propagateLiveCount(delta: number): void;
     calculateLayout(): void;

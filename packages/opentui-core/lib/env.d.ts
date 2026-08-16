@@ -32,6 +32,7 @@ export interface EnvVarConfig {
     name: string;
     description: string;
     default?: string | boolean | number;
+    required?: boolean;
     type?: "string" | "boolean" | "number";
 }
 export declare const envRegistry: Record<string, EnvVarConfig>;

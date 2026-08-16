@@ -13,7 +13,7 @@ var NATIVE_FILE_NAMES = {
   // itself still resolves native.packageName via node package resolution
   // (there is no @opentui/core-openharmony-* package), so it stays unsupported
   // on OHOS — this export isn't on opencode's bun runtime path, which uses
-  // chunk-bun-t2myhmwd.js's bundled-file resolution instead.
+  // chunk-bun-26r5c5w5.js's bundled-file resolution instead.
   openharmony: "libopentui.so"
 };
 function getNativeAssetDescriptor(target) {
@@ -54,7 +54,7 @@ var envRegistry = singleton("env-registry", () => ({}));
 function registerEnvVar(config) {
   const existing = envRegistry[config.name];
   if (existing) {
-    if (existing.description !== config.description || existing.type !== config.type || existing.default !== config.default) {
+    if (existing.description !== config.description || existing.type !== config.type || existing.default !== config.default || existing.required !== config.required) {
       throw new Error(`Environment variable "${config.name}" is already registered with different configuration. ` + `Existing: ${JSON.stringify(existing)}, New: ${JSON.stringify(config)}`);
     }
     return;
@@ -69,6 +69,9 @@ function parseEnvValue(config) {
   const envValue = process.env[config.name];
   if (envValue === undefined && config.default !== undefined) {
     return config.default;
+  }
+  if (envValue === undefined && config.required === false) {
+    return;
   }
   if (envValue === undefined) {
     throw new Error(`Required environment variable ${config.name} is not set. ${config.description}`);
@@ -264,5 +267,5 @@ export {
   getNodeAssets
 };
 
-//# debugId=CA3D232D897F070364756E2164756E21
+//# debugId=2D9AF8B7C6420F5D64756E2164756E21
 //# sourceMappingURL=node-assets.js.map

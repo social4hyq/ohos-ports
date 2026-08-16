@@ -3357,7 +3357,7 @@ var envRegistry = singleton("env-registry", () => ({}));
 function registerEnvVar(config) {
   const existing = envRegistry[config.name];
   if (existing) {
-    if (existing.description !== config.description || existing.type !== config.type || existing.default !== config.default) {
+    if (existing.description !== config.description || existing.type !== config.type || existing.default !== config.default || existing.required !== config.required) {
       throw new Error(`Environment variable "${config.name}" is already registered with different configuration. ` + `Existing: ${JSON.stringify(existing)}, New: ${JSON.stringify(config)}`);
     }
     return;
@@ -3372,6 +3372,9 @@ function parseEnvValue(config) {
   const envValue = process.env[config.name];
   if (envValue === undefined && config.default !== undefined) {
     return config.default;
+  }
+  if (envValue === undefined && config.required === false) {
+    return;
   }
   if (envValue === undefined) {
     throw new Error(`Required environment variable ${config.name} is not set. ${config.description}`);
@@ -4403,10 +4406,11 @@ function logMessage(type, ...args2) {
     data: args2
   });
 }
-function postWorkerError(bufferId, error) {
+function postWorkerError(bufferId, messageId, error) {
   postWorkerMessage({
     type: "ERROR",
     bufferId,
+    messageId,
     error: error instanceof Error ? error.stack || error.message : String(error)
   });
 }
@@ -4548,14 +4552,15 @@ if (isWorkerRuntime) {
           });
       }
     } catch (error) {
+      const messageId = "messageId" in message ? message.messageId : undefined;
       if ("bufferId" in message) {
-        postWorkerError(message.bufferId, error);
+        postWorkerError(message.bufferId, messageId, error);
       } else {
-        postWorkerError(undefined, error);
+        postWorkerError(undefined, messageId, error);
       }
     }
   });
 }
 
-//# debugId=87DC963DDC93A9B264756E2164756E21
+//# debugId=E1AC0FF95C96198464756E2164756E21
 //# sourceMappingURL=parser.worker.js.map

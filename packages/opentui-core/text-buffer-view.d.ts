@@ -1,5 +1,5 @@
 import { RGBA } from "./lib/RGBA.js";
-import { type LineInfo, type RenderLib, type TextBufferViewHandle } from "./zig.js";
+import { type LineInfo, type MeasureResult, type RenderLib, type TextBufferViewHandle } from "./zig.js";
 import type { TextBuffer } from "./text-buffer.js";
 export declare class TextBufferView {
     private lib;
@@ -33,10 +33,7 @@ export declare class TextBufferView {
     setTabIndicator(indicator: string | number): void;
     setTabIndicatorColor(color: RGBA): void;
     setTruncate(truncate: boolean): void;
-    measureForDimensions(width: number, height: number): {
-        lineCount: number;
-        widthColsMax: number;
-    } | null;
+    measureForDimensions(width: number, height: number): MeasureResult | null;
     getVirtualLineCount(): number;
     destroy(): void;
 }
